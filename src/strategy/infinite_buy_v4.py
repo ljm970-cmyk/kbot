@@ -60,7 +60,7 @@ class PriceHistory:
 
 
 class PositionState:
-    """V4 포지션 상태 및 계산"""
+    """V4 포지션 상태 및 주문 계산"""
     
     def __init__(self, config: InfiniteBuyV4Config):
         self.cfg = config
@@ -75,8 +75,6 @@ class PositionState:
         self.cycle_count: int = 0
         self.cycle_start_date: Optional[datetime] = None
         self.cycle_start_principal: Decimal = config.principal_usd
-    
-    # === 속성 ===
     
     @property
     def phase(self) -> MarketPhase:
@@ -108,8 +106,6 @@ class PositionState:
         base, coeff = self.cfg.STAR_PARAMS[(self.cfg.ticker, self.cfg.total_splits)]
         return base - coeff * self.T
     
-    # === 기본 메서드 ===
-    
     def update_avg_price(self, new_qty: int, new_price: Decimal):
         total = self.quantity + new_qty
         if total <= 0:
@@ -118,12 +114,9 @@ class PositionState:
         total_cost = (self.avg_price * self.quantity) + (new_price * new_qty)
         self.avg_price = (total_cost / total).quantize(Decimal("0.0001"), ROUND_HALF_UP)
     
-    # === 주문 계산 ===
+    # === 주문 계산 메서드들 ===
     
     def calculate_orders(self, current_price: Optional[Decimal] = None) -> List[Dict]:
-        """
-        V4 전략 기반 주문 계산
-        """
         orders = []
         
         if self.quantity > 0 and current_price:
@@ -176,7 +169,6 @@ class PositionState:
         if buy_amount <= 0:
             return orders
         
-        # 주식 수량 계산 (금액 / 현재가)
         qty = self._calculate_quantity(buy_amount, current_price)
         
         orders.append({
@@ -192,10 +184,9 @@ class PositionState:
     def _calculate_quantity(self, amount: Decimal, price: Optional[Decimal]) -> int:
         """금액 기준 주식 수량 계산"""
         if not price or price <= 0:
-            return 1  # 기본값
-        
+            return 1
         qty = int(amount / price)
-        return max(qty, 1)  # 최소 1주
+        return max(qty, 1)
     
     # === 체결 처리 ===
     

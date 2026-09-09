@@ -295,3 +295,89 @@ class V4OrderExecutor:
     async def execute_sell_order_gtc(self, ticker: str, price: str, quantity: int):
         logger.warning("GTC는 LOC로 대체, 미체결 시 다음날 재주문 필요")
         return await self.client.sell_loc(ticker, quantity, price)
+
+# === 예약주문 API (ust21200/ust21201) ===
+
+async def buy_reserve(self, ticker: str, quantity: int, price: str,
+                      start_date: str, end_date: str = "",
+                      reserve_type: str = "1", exchange: str = "ND"):
+    """
+    미국주식 예약매수주문 - ust21200
+    
+    Parameters:
+        start_date: 예약시작일자 YYYYMMDD
+        end_date: 예약종료일자 (기간예약시)
+        reserve_type: 1=일반예약, 2=기간예약-잔량, 3=기간예약-지정수량
+    """
+    body = {
+        "api_id": "ust21200",
+        "stex_tp": exchange,
+        "stk_cd": ticker,
+        "ord_qty": str(quantity),
+        "ord_uv": str(price),
+        "trde_tp": "30",
+        "rsrv_ord_tp": reserve_type,
+        "rsrv_strt_dt": start_date,
+    }
+    
+    if end_date:
+        body["rsrv_end_dt"] = end_date
+    
+    headers = self._headers("ust21200")
+    response = await self.client.post(self.ORDER_ENDPOINT, headers=headers, json=body)
+    response.raise_for_status()
+    return response.json()
+
+
+async def sell_reserve(self, ticker: str, quantity: int, price: str,
+                       start_date: str, end_date: str = "",
+                       reserve_type: str = "1", exchange: str = "ND"):
+    """미국주식 예약매도주문 - ust21201"""
+    body = {
+        "api_id": "ust21201",
+        "stex_tp": exchange,
+        "stk_cd": ticker,
+        "ord_qty": str(quantity),
+        "ord_uv": str(price),
+        "trde_tp": "30",
+        "rsrv_ord_tp": reserve_type,
+        "rsrv_strt_dt": start_date,
+    }
+    
+    if end_date:
+        body["rsrv_end_dt"] = end_date
+    
+    headers = self._headers("ust21201")
+    response = await self.client.post(self.ORDER_ENDPOINT, headers=headers, json=body)
+    response.raise_for_status()
+    return response.json()
+
+
+async def cancel_reserve(self, order_no: str):
+    """미국주식 예약주문취소 - ust21203"""
+    body = {
+        "api_id": "ust21203",
+        "ord_no": order_no,
+    }
+    
+    headers = self._headers("ust21203")
+    response = await self.client.post(self.ORDER_ENDPOINT, headers=headers, json=body)
+    response.raise_for_status()
+    return response.json()
+
+
+async def get_reserve_list(self, **kwargs):
+    """미국주식 예약주문내역조회 - ust21205"""
+    body = {
+        "api_id": "ust21205",
+    }
+    
+    # 필터 조건 추가 가능
+    for key in ["rsrv_strt_dt", "rsrv_end_dt", "ord_no"]:
+        if key in kwargs:
+            body[key] = kwargs[key]
+    
+    headers = self._headers("ust21205")
+    response = await self.client.post(self.ACCOUNT_ENDPOINT, headers=headers, json=body)
+    response.raise_for_status()
+    return response.json()

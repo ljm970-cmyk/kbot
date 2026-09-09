@@ -1,23 +1,47 @@
 """키움증권 미국주식 REST API 클라이언트"""
 
 import httpx
-import os
 from decimal import Decimal
-from typing import Optional, List
+from typing import Optional, List, Dict
 import logging
 
 logger = logging.getLogger(__name__)
 
 
+class OrderError(Exception):
+    """주문 실패 예외"""
+    pass
+
+
 class KiwoomUSClient:
     """
     키움증권 미국주식 REST API 클라이언트
-    v4 실전/모의 설정 연결
+    
+    UST20000: 매수주문
+    UST20001: 매도주문  
+    UST20002: 정정주문
+    UST20003: 취소주문
+    UST21050: 원장미체결
+    UST21070: 원장잔고확인
+    UST21100: 거래내역
+    UST21110: 해외주식예수금
     """
     
-    # 공식 문서 기준 도메인 (수정됨)
-    PRD_URL = "https://openapi.kiwoom.com"      # ✅ openapi 추가
-    MOCK_URL = "https://mockapi.kiwoom.com"       # ✅ hyphen 제거
+    # 공식 문서 기준: api.kiwoom.com (openapi 아님!)
+    PRD_URL = "https://api.kiwoom.com"
+    MOCK_URL = "https://mockapi.kiwoom.com"
+    
+    # 엔드포인트
+    ORDER_ENDPOINT = "/api/us/ordr"
+    ACCOUNT_ENDPOINT = "/api/us/acnt"
+    
+    # 거래소 코드 매핑
+    EXCHANGE_MAP = {
+        "AMEX": "NA",
+        "NASDAQ": "ND",
+        "NYSE": "NY",
+        "NASD": "ND",  # 별칭
+    }
     
     def __init__(
         self,
@@ -25,7 +49,7 @@ class KiwoomUSClient:
         app_secret: str,
         access_token: str = "",
         is_mock: bool = False,
-        base_url: str = ""  # 외부에서 주입 가능
+        base_url: str = ""
     ):
         self.app_key = app_key
         self.app_secret = app_secret
@@ -45,21 +69,17 @@ class KiwoomUSClient:
             headers={"Content-Type": "application/json;charset=UTF-8"}
         )
         
-        logger.info(f"KiwoomUSClient 초기화: {self.base_url} (mock={is_mock})")
+        logger.info(f"KiwoomUSClient: {self.base_url} (mock={is_mock})")
     
     # === 토큰 발급 ===
     async def issue_token(self) -> str:
-        """
-        OAuth 2.0 클라이언트 자격증명으로 토큰 발급
-        공식 문서: au10001 접근토큰발급
-        """
         url = f"{self.base_url}/oauth2/token"
         
         headers = {"Content-Type": "application/json;charset=UTF-8"}
         body = {
             "grant_type": "client_credentials",
             "appkey": self.app_key,
-            "secretkey": self.app_secret  # 키움은 "secretkey" 필드명 사용
+            "secretkey": self.app_secret
         }
         
         try:
@@ -68,9 +88,7 @@ class KiwoomUSClient:
             data = response.json()
             
             self.access_token = data["token"]
-            expires = data.get("expires_dt", "unknown")
-            
-            logger.info(f"토큰 발급 성공, 만료: {expires}")
+            logger.info(f"토큰 발급: 만료 {data.get('expires_dt', 'unknown')}")
             return self.access_token
             
         except httpx.HTTPStatusError as e:
@@ -81,55 +99,181 @@ class KiwoomUSClient:
             raise
     
     def _headers(self, api_id: str) -> dict:
-        """API 호출용 공통 헤더"""
         if not self.access_token:
             raise RuntimeError("access_token 없음. issue_token() 먼저 호출")
-        
         return {
             "authorization": f"Bearer {self.access_token}",
             "api-id": api_id,
-            "appkey": self.app_key,           # 일부 TR에 필요
-            "secretkey": self.app_secret,      # 일부 TR에 필요
+            "appkey": self.app_key,
+            "secretkey": self.app_secret,
         }
     
     async def close(self):
         await self.client.aclose()
     
-    # === 미국주식 API (TODO: 실제 TR 코드로 교체) ===
-    async def get_positions(self) -> List[dict]:
-        """원장잔고확인 (TODO: 실제 TR 코드 확인 필요)"""
-        # TR: ust21070 → 실제 키움 문서에서 미국주식 잔고 TR 확인
-        logger.warning("get_positions: TODO - 실제 API 호출 구현 필요")
-        return []
+    # === 거래소 코드 유틸 ===
+    def _get_exchange_code(self, exchange_hint: str = "") -> str:
+        if exchange_hint:
+            return self.EXCHANGE_MAP.get(exchange_hint.upper(), "ND")
+        return "ND"  # 기본 NASDAQ
     
-    async def get_today_fills(self, ticker: str) -> List[dict]:
-        """당일 주문체결 (TODO: 실제 TR 코드 확인 필요)"""
-        logger.warning("get_today_fills: TODO - 실제 API 호출 구현 필요")
-        return []
+    def _guess_exchange(self, ticker: str) -> str:
+        """티커로 거래소 추정 (기본 NASDAQ)"""
+        return "ND"
+    
+    # === 주문 API ===
+    
+    async def _order(self, api_id: str, exchange: str, ticker: str,
+                     quantity: int, trade_type: str, price: str = "") -> Dict:
+        """
+        미국주식 주문 공통
+        
+        trade_type: 00=지정가, 03=시장가, 30=LOC, 31=MOO, 32=MOC
+        """
+        body = {
+            "api_id": api_id,
+            "stex_tp": exchange,         # 거래소구분 (NA/ND/NY)
+            "stk_cd": ticker,             # 종목코드
+            "ord_qty": str(quantity),     # 주문수량
+            "trde_tp": trade_type,        # 해외매매구분
+        }
+        
+        # 지정가, LOC 등 가격 필요
+        if trade_type in ("00", "30") and price:
+            body["ord_uv"] = str(price)   # 주문단가
+        
+        headers = self._headers(api_id=api_id)
+        
+        logger.info(f"주문: {api_id} {ticker} {quantity}주 type={trade_type} price={price or '시장가'}")
+        
+        response = await self.client.post(
+            self.ORDER_ENDPOINT,
+            headers=headers,
+            json=body
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        # 결과 확인
+        ret_code = data.get("return_code", -1)
+        ret_msg = data.get("return_msg", "unknown")
+        
+        if ret_code != 0:
+            logger.error(f"주문 실패: {ret_code} - {ret_msg}")
+            raise OrderError(f"주문 실패: {ret_msg}")
+        
+        logger.info(f"주문 성공: ord_no={data.get('ord_no')}")
+        return data
+    
+    async def buy_loc(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
+        """LOC 매수 - ust20000"""
+        return await self._order("ust20000", exchange, ticker, quantity, "30", price)
+    
+    async def buy_moo(self, ticker: str, quantity: int, exchange: str = "ND"):
+        """MOO 매수 - ust20000"""
+        return await self._order("ust20000", exchange, ticker, quantity, "31")
+    
+    async def buy_moc(self, ticker: str, quantity: int, exchange: str = "ND"):
+        """MOC 매수 - ust20000"""
+        return await self._order("ust20000", exchange, ticker, quantity, "32")
+    
+    async def buy_limit(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
+        """지정가 매수 - ust20000"""
+        return await self._order("ust20000", exchange, ticker, quantity, "00", price)
+    
+    async def sell_loc(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
+        """LOC 매도 - ust20001"""
+        return await self._order("ust20001", exchange, ticker, quantity, "30", price)
+    
+    async def sell_moo(self, ticker: str, quantity: int, exchange: str = "ND"):
+        """MOO 매도 - ust20001"""
+        return await self._order("ust20001", exchange, ticker, quantity, "31")
+    
+    async def sell_moc(self, ticker: str, quantity: int, exchange: str = "ND"):
+        """MOC 매도 - ust20001"""
+        return await self._order("ust20001", exchange, ticker, quantity, "32")
+    
+    async def sell_limit(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
+        """지정가 매도 - ust20001"""
+        return await self._order("ust20001", exchange, ticker, quantity, "00", price)
+    
+    # === 계좌/조회 API ===
+    
+    async def get_balance(self) -> Dict:
+        """미국주식 원장잔고확인 - ust21070"""
+        body = {"api_id": "ust21070"}
+        headers = self._headers("ust21070")
+        
+        response = await self.client.post(
+            self.ACCOUNT_ENDPOINT,
+            headers=headers,
+            json=body
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def get_unfilled_orders(self) -> List[Dict]:
+        """미국주식 원장미체결 - ust21050"""
+        body = {"api_id": "ust21050"}
+        headers = self._headers("ust21050")
+        
+        response = await self.client.post(
+            self.ACCOUNT_ENDPOINT,
+            headers=headers,
+            json=body
+        )
+        response.raise_for_status()
+        return response.json().get("output", [])
+    
+    async def get_trade_history(self) -> List[Dict]:
+        """미국주식 거래내역 - ust21100"""
+        body = {"api_id": "ust21100"}
+        headers = self._headers("ust21100")
+        
+        response = await self.client.post(
+            self.ACCOUNT_ENDPOINT,
+            headers=headers,
+            json=body
+        )
+        response.raise_for_status()
+        return response.json().get("output", [])
+    
+    async def get_deposit(self) -> Dict:
+        """해외주식 예수금 - ust21110"""
+        body = {"api_id": "ust21110"}
+        headers = self._headers("ust21110")
+        
+        response = await self.client.post(
+            self.ACCOUNT_ENDPOINT,
+            headers=headers,
+            json=body
+        )
+        response.raise_for_status()
+        return response.json()
 
+
+# === V4 전략 실행기 ===
 
 class V4OrderExecutor:
-    """V4 전략 주문 실행기"""
-    
     def __init__(self, client: KiwoomUSClient):
         self.client = client
     
-    async def execute_buy_with_big_number_fallback(self, **kwargs):
-        """큰수매수 fallback 포함 매수 (TODO)"""
-        logger.warning("execute_buy: TODO")
-        pass
+    async def execute_buy_with_big_number_fallback(self, ticker: str, quantity: int, price: str):
+        """큰수매수: LOC 지정가 매수"""
+        return await self.client.buy_loc(ticker, quantity, price)
     
-    async def execute_sell_order_loc(self, ticker, price, quantity):
-        """LOC 매도 (TODO)"""
-        logger.warning("execute_sell_order_loc: TODO")
-        pass
+    async def execute_sell_order_loc(self, ticker: str, price: str, quantity: int):
+        """LOC 매도"""
+        return await self.client.sell_loc(ticker, quantity, price)
     
-    async def execute_sell_order_moc(self, ticker, quantity):
-        """MOC 매도 (TODO)"""
-        logger.warning("execute_sell_order_moc: TODO")
-        pass
+    async def execute_sell_order_moc(self, ticker: str, quantity: int):
+        """MOC 매도"""
+        return await self.client.sell_moc(ticker, quantity)
     
-    async def execute_sell_order_gtc(self, ticker, price, quantity):
-        """GTC 매도 (TODO)"""
-        logger.warning("execute_sell_order_gtc: TODO")
-        pass
+    async def execute_sell_order_gtc(self, ticker: str, price: str, quantity: int):
+        """
+        GTC 매도 (Good Till Cancelled)
+        키움 API에 GTC 없음 → LOC + 내부 재주문 관리로 구현
+        """
+        logger.warning("GTC는 LOC로 대체, 미체결 시 다음날 재주문 필요")
+        return await self.client.sell_loc(ticker, quantity, price)

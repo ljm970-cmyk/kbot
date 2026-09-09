@@ -114,3 +114,101 @@ class PositionState:
 
 # datetime import 추가
 from datetime import datetime
+
+    def calculate_orders(self, current_price: Optional[Decimal] = None) -> List[Dict]:
+        orders = []
+        
+        if self.quantity > 0 and current_price:
+            sell_orders = self._calculate_sell_orders(current_price)
+            orders.extend(sell_orders)
+        
+        buy_orders = self._calculate_buy_orders(current_price)
+        orders.extend(buy_orders)
+        
+        return orders
+    
+    def _calculate_sell_orders(self, current_price: Decimal) -> List[Dict]:
+        orders = []
+        star_target = self.star_pct
+        
+        if star_target > 0:
+            target_price = self.avg_price * (Decimal("100") + star_target) / Decimal("100")
+            if current_price >= target_price:
+                orders.append({
+                    "side": "sell",
+                    "quantity": self.quantity,
+                    "price": str(target_price.quantize(Decimal("0.01"))),
+                    "ticker": self.cfg.ticker,
+                    "sell_type": "loc",
+                    "reason": f"STAR({star_target}%)"
+                })
+        
+        if self.is_reverse_mode and self.quantity > 0:
+            exit_pct = self.cfg.REVERSE_EXIT_PCT.get(self.cfg.ticker, Decimal("0.85"))
+            exit_price = self.avg_price * exit_pct
+            if current_price <= exit_price:
+                orders.append({
+                    "side": "sell",
+                    "quantity": self.quantity,
+                    "price": str(exit_price.quantize(Decimal("0.01"))),
+                    "ticker": self.cfg.ticker,
+                    "sell_type": "moc",
+                    "reason": f"REVERSE({exit_pct*100}%)"
+                })
+        
+        return orders
+    
+    def _calculate_buy_orders(self, current_price: Optional[Decimal]) -> List[Dict]:
+        orders = []
+        
+        if self.T >= self.cfg.total_splits:
+            return orders
+        
+        buy_amount = self.one_buy_amount
+        if buy_amount <= 0:
+            return orders
+        
+        # 주식 수량 계산 (금액 / 가격)
+        qty = 1  # TODO: 금액 기반 수량 계산
+        
+        orders.append({
+            "side": "buy",
+            "quantity": qty,
+            "price": str(current_price.quantize(Decimal("0.01"))) if current_price else "0",
+            "ticker": self.cfg.ticker,
+            "reason": f"T={self.T}"
+        })
+        
+        return orders
+    
+    def record_fill(self, order: Dict, filled_qty: int, filled_price: Decimal):
+        self.today_fills.append({
+            "order": order,
+            "filled_qty": filled_qty,
+            "filled_price": filled_price,
+            "time": datetime.now()
+        })
+        
+        if order["side"] == "buy":
+            self.update_avg_price(filled_qty, filled_price)
+            self.quantity += filled_qty
+            self.balance -= filled_price * filled_qty
+            self.T += Decimal("1")
+        elif order["side"] == "sell":
+            self.quantity -= filled_qty
+            pnl = (filled_price - self.avg_price) * filled_qty
+            self.realized_pnl += pnl
+            if self.quantity <= 0:
+                self._reset_cycle()
+    
+    def _reset_cycle(self):
+        self.quantity = 0
+        self.avg_price = Decimal("0")
+        self.T = Decimal("0")
+        self.cycle_count += 1
+        self.cycle_start_date = datetime.now().date()
+        if self.cfg.compound:
+            self.balance = self.balance + self.realized_pnl
+            self.cycle_start_principal = self.balance
+        else:
+            self.balance = self.cfg.principal_usd

@@ -15,6 +15,7 @@ class OrderError(Exception):
 class KiwoomUSClient:
     """
     키움증권 미국주식 REST API 클라이언트
+    v4.1: 예약주문 추가
     """
     
     PRD_URL = "https://api.kiwoom.com"
@@ -23,8 +24,8 @@ class KiwoomUSClient:
     # 엔드포인트
     ORDER_ENDPOINT = "/api/us/ordr"
     ACCOUNT_ENDPOINT = "/api/us/acnt"
-    MARKET_ENDPOINT = "/api/us/mrkcond"  # 시세 엔드포인트
-    STOCKINFO_ENDPOINT = "/api/us/stkinfo"  # 종목정보
+    MARKET_ENDPOINT = "/api/us/mrkcond"
+    STOCKINFO_ENDPOINT = "/api/us/stkinfo"
     
     # 거래소 코드 매핑
     EXCHANGE_MAP = {
@@ -104,9 +105,6 @@ class KiwoomUSClient:
     # === 시세 API ===
     
     async def get_stock_info(self, ticker: str, exchange: str = "ND") -> Dict:
-        """
-        미국주식 종목정보 조회 - usa10100
-        """
         body = {
             "api_id": "usa10100",
             "stex_tp": exchange,
@@ -124,9 +122,6 @@ class KiwoomUSClient:
         return response.json()
     
     async def get_current_price(self, ticker: str, exchange: str = "ND") -> Dict:
-        """
-        미국주식 현재가 종목정보 - usa20100
-        """
         body = {
             "api_id": "usa20100",
             "stex_tp": exchange,
@@ -144,10 +139,6 @@ class KiwoomUSClient:
         return response.json()
     
     async def get_daily_prices(self, ticker: str, exchange: str = "ND", base_date: str = "") -> Dict:
-        """
-        미국주식 일별주가 - usa20590
-        base_date: 기준일자 (YYYYMMDD), 이전 내역 조회
-        """
         body = {
             "api_id": "usa20590",
             "stex_tp": exchange,
@@ -229,7 +220,90 @@ class KiwoomUSClient:
     async def sell_limit(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
         return await self._order("ust20001", exchange, ticker, quantity, "00", price)
     
+    # === 예약주문 API (v4.1 추가) ===
+    
+    async def buy_reserve(self, ticker: str, quantity: int, price: str,
+                          start_date: str, end_date: str = "",
+                          reserve_type: str = "1", exchange: str = "ND"):
+        """
+        미국주식 예약매수주문 - ust21200
+        
+        Parameters:
+            start_date: 예약시작일자 YYYYMMDD
+            end_date: 예약종료일자 (기간예약시)
+            reserve_type: 1=일반예약, 2=기간예약-잔량, 3=기간예약-지정수량
+        """
+        body = {
+            "api_id": "ust21200",
+            "stex_tp": exchange,
+            "stk_cd": ticker,
+            "ord_qty": str(quantity),
+            "ord_uv": str(price),
+            "trde_tp": "30",
+            "rsrv_ord_tp": reserve_type,
+            "rsrv_strt_dt": start_date,
+        }
+        
+        if end_date:
+            body["rsrv_end_dt"] = end_date
+        
+        headers = self._headers("ust21200")
+        response = await self.client.post(self.ORDER_ENDPOINT, headers=headers, json=body)
+        response.raise_for_status()
+        return response.json()
+    
+    async def sell_reserve(self, ticker: str, quantity: int, price: str,
+                           start_date: str, end_date: str = "",
+                           reserve_type: str = "1", exchange: str = "ND"):
+        """미국주식 예약매도주문 - ust21201"""
+        body = {
+            "api_id": "ust21201",
+            "stex_tp": exchange,
+            "stk_cd": ticker,
+            "ord_qty": str(quantity),
+            "ord_uv": str(price),
+            "trde_tp": "30",
+            "rsrv_ord_tp": reserve_type,
+            "rsrv_strt_dt": start_date,
+        }
+        
+        if end_date:
+            body["rsrv_end_dt"] = end_date
+        
+        headers = self._headers("ust21201")
+        response = await self.client.post(self.ORDER_ENDPOINT, headers=headers, json=body)
+        response.raise_for_status()
+        return response.json()
+    
+    async def cancel_reserve(self, order_no: str):
+        """미국주식 예약주문취소 - ust21203"""
+        body = {
+            "api_id": "ust21203",
+            "ord_no": order_no,
+        }
+        
+        headers = self._headers("ust21203")
+        response = await self.client.post(self.ORDER_ENDPOINT, headers=headers, json=body)
+        response.raise_for_status()
+        return response.json()
+    
+    async def get_reserve_list(self, **kwargs):
+        """미국주식 예약주문내역조회 - ust21205"""
+        body = {
+            "api_id": "ust21205",
+        }
+        
+        for key in ["rsrv_strt_dt", "rsrv_end_dt", "ord_no"]:
+            if key in kwargs:
+                body[key] = kwargs[key]
+        
+        headers = self._headers("ust21205")
+        response = await self.client.post(self.ACCOUNT_ENDPOINT, headers=headers, json=body)
+        response.raise_for_status()
+        return response.json()
+    
     # === 계좌/조회 API ===
+    
     async def get_balance(self) -> Dict:
         body = {"api_id": "ust21070"}
         headers = self._headers("ust21070")
@@ -295,89 +369,3 @@ class V4OrderExecutor:
     async def execute_sell_order_gtc(self, ticker: str, price: str, quantity: int):
         logger.warning("GTC는 LOC로 대체, 미체결 시 다음날 재주문 필요")
         return await self.client.sell_loc(ticker, quantity, price)
-
-# === 예약주문 API (ust21200/ust21201) ===
-
-async def buy_reserve(self, ticker: str, quantity: int, price: str,
-                      start_date: str, end_date: str = "",
-                      reserve_type: str = "1", exchange: str = "ND"):
-    """
-    미국주식 예약매수주문 - ust21200
-    
-    Parameters:
-        start_date: 예약시작일자 YYYYMMDD
-        end_date: 예약종료일자 (기간예약시)
-        reserve_type: 1=일반예약, 2=기간예약-잔량, 3=기간예약-지정수량
-    """
-    body = {
-        "api_id": "ust21200",
-        "stex_tp": exchange,
-        "stk_cd": ticker,
-        "ord_qty": str(quantity),
-        "ord_uv": str(price),
-        "trde_tp": "30",
-        "rsrv_ord_tp": reserve_type,
-        "rsrv_strt_dt": start_date,
-    }
-    
-    if end_date:
-        body["rsrv_end_dt"] = end_date
-    
-    headers = self._headers("ust21200")
-    response = await self.client.post(self.ORDER_ENDPOINT, headers=headers, json=body)
-    response.raise_for_status()
-    return response.json()
-
-
-async def sell_reserve(self, ticker: str, quantity: int, price: str,
-                       start_date: str, end_date: str = "",
-                       reserve_type: str = "1", exchange: str = "ND"):
-    """미국주식 예약매도주문 - ust21201"""
-    body = {
-        "api_id": "ust21201",
-        "stex_tp": exchange,
-        "stk_cd": ticker,
-        "ord_qty": str(quantity),
-        "ord_uv": str(price),
-        "trde_tp": "30",
-        "rsrv_ord_tp": reserve_type,
-        "rsrv_strt_dt": start_date,
-    }
-    
-    if end_date:
-        body["rsrv_end_dt"] = end_date
-    
-    headers = self._headers("ust21201")
-    response = await self.client.post(self.ORDER_ENDPOINT, headers=headers, json=body)
-    response.raise_for_status()
-    return response.json()
-
-
-async def cancel_reserve(self, order_no: str):
-    """미국주식 예약주문취소 - ust21203"""
-    body = {
-        "api_id": "ust21203",
-        "ord_no": order_no,
-    }
-    
-    headers = self._headers("ust21203")
-    response = await self.client.post(self.ORDER_ENDPOINT, headers=headers, json=body)
-    response.raise_for_status()
-    return response.json()
-
-
-async def get_reserve_list(self, **kwargs):
-    """미국주식 예약주문내역조회 - ust21205"""
-    body = {
-        "api_id": "ust21205",
-    }
-    
-    # 필터 조건 추가 가능
-    for key in ["rsrv_strt_dt", "rsrv_end_dt", "ord_no"]:
-        if key in kwargs:
-            body[key] = kwargs[key]
-    
-    headers = self._headers("ust21205")
-    response = await self.client.post(self.ACCOUNT_ENDPOINT, headers=headers, json=body)
-    response.raise_for_status()
-    return response.json()

@@ -133,3 +133,72 @@ class PremarketDelayScheduler:
     async def shutdown(self):
         self.scheduler.shutdown()
         logger.info("스케줄러 종료")
+class PremarketDelayScheduler:
+    def __init__(self, portfolio, executor, telegram=None, use_websocket=False):
+        # ... 기존 코드
+        
+        self.use_websocket = use_websocket
+        self.ws_client = None
+    
+    async def initialize(self):
+        # 기존 스케줄러 등록...
+        
+        if self.use_websocket:
+            await self._init_websocket()
+            
+            # 장중 STAR 체크 (16:00-21:00, 5분마다)
+            self.scheduler.add_job(
+                self._check_star_realtime,
+                "cron", minute="*/5",
+                hour="16-21", timezone=KST,
+                id="star_check",
+            )
+    
+    async def _init_websocket(self):
+        self.ws_client = KiwoomUSWebSocket(
+            access_token=self.executor.client.access_token,
+            app_key=self.executor.client.app_key,
+            is_mock=self.executor.client.is_mock,
+        )
+        await self.ws_client.connect()
+        await self.ws_client.subscribe_stock(self.portfolio.cfg.ticker, "FE")
+        asyncio.create_task(self.ws_client.receive_loop())
+    
+    async def _check_star_realtime(self):
+        if not self.ws_client:
+            return
+        
+        ticker = self.portfolio.cfg.ticker
+        current_price = self.ws_client.get_current_price(ticker)
+        
+        if current_price is None:
+            return
+        
+        star_target = self.portfolio.star_pct
+        if star_target <= 0:
+            return
+        
+        target_price = self.portfolio.avg_price * (Decimal("100") + star_target) / Decimal("100")
+        
+        if current_price >= target_price and self.portfolio.quantity > 0:
+            logger.info(f"🎯 STAR 실시간 매도: {current_price} >= {target_price}")
+            
+            result = await self.executor.execute_sell_order_loc(
+                ticker=ticker,
+                price=str(target_price.quantize(Decimal("0.01"))),
+                quantity=self.portfolio.quantity,
+            )
+            
+            if self.telegram:
+                await self.telegram.send_message(
+                    f"🎯 STAR 실시간 매도!\n"
+                    f"가격: {current_price} (목표: {target_price})\n"
+                    f"주문번호: {result.get('ord_no')}"
+                )
+    
+    async def _get_current_price(self, ticker: str = "TQQQ"):
+        # WebSocket 우선
+        if self.ws_client and self.ws_client.get_current_price(ticker):
+            return self.ws_client.get_current_price(ticker)
+        # REST API fallback
+        return await self._get_current_price_rest(ticker)

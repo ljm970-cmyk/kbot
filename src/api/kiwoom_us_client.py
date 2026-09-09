@@ -15,24 +15,16 @@ class OrderError(Exception):
 class KiwoomUSClient:
     """
     키움증권 미국주식 REST API 클라이언트
-    
-    UST20000: 매수주문
-    UST20001: 매도주문  
-    UST20002: 정정주문
-    UST20003: 취소주문
-    UST21050: 원장미체결
-    UST21070: 원장잔고확인
-    UST21100: 거래내역
-    UST21110: 해외주식예수금
     """
     
-    # 공식 문서 기준: api.kiwoom.com
     PRD_URL = "https://api.kiwoom.com"
     MOCK_URL = "https://mockapi.kiwoom.com"
     
     # 엔드포인트
     ORDER_ENDPOINT = "/api/us/ordr"
     ACCOUNT_ENDPOINT = "/api/us/acnt"
+    MARKET_ENDPOINT = "/api/us/mrkcond"  # 시세 엔드포인트
+    STOCKINFO_ENDPOINT = "/api/us/stkinfo"  # 종목정보
     
     # 거래소 코드 매핑
     EXCHANGE_MAP = {
@@ -109,14 +101,71 @@ class KiwoomUSClient:
     async def close(self):
         await self.client.aclose()
     
-    # === 거래소 코드 유틸 ===
-    def _get_exchange_code(self, exchange_hint: str = "") -> str:
-        if exchange_hint:
-            return self.EXCHANGE_MAP.get(exchange_hint.upper(), "ND")
-        return "ND"
+    # === 시세 API ===
     
-    def _guess_exchange(self, ticker: str) -> str:
-        return "ND"  # 기본 NASDAQ
+    async def get_stock_info(self, ticker: str, exchange: str = "ND") -> Dict:
+        """
+        미국주식 종목정보 조회 - usa10100
+        """
+        body = {
+            "api_id": "usa10100",
+            "stex_tp": exchange,
+            "stk_cd": ticker,
+        }
+        
+        headers = self._headers("usa10100")
+        
+        response = await self.client.post(
+            self.STOCKINFO_ENDPOINT,
+            headers=headers,
+            json=body
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def get_current_price(self, ticker: str, exchange: str = "ND") -> Dict:
+        """
+        미국주식 현재가 종목정보 - usa20100
+        """
+        body = {
+            "api_id": "usa20100",
+            "stex_tp": exchange,
+            "stk_cd": ticker,
+        }
+        
+        headers = self._headers("usa20100")
+        
+        response = await self.client.post(
+            self.MARKET_ENDPOINT,
+            headers=headers,
+            json=body
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def get_daily_prices(self, ticker: str, exchange: str = "ND", base_date: str = "") -> Dict:
+        """
+        미국주식 일별주가 - usa20590
+        base_date: 기준일자 (YYYYMMDD), 이전 내역 조회
+        """
+        body = {
+            "api_id": "usa20590",
+            "stex_tp": exchange,
+            "stk_cd": ticker,
+        }
+        
+        if base_date:
+            body["base_dt"] = base_date
+        
+        headers = self._headers("usa20590")
+        
+        response = await self.client.post(
+            self.MARKET_ENDPOINT,
+            headers=headers,
+            json=body
+        )
+        response.raise_for_status()
+        return response.json()
     
     # === 주문 API ===
     async def _order(self, api_id: str, exchange: str, ticker: str,

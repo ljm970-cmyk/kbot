@@ -15,7 +15,7 @@ class OrderError(Exception):
 class KiwoomUSClient:
     """
     키움증권 미국주식 REST API 클라이언트
-    v4.1: 예약주문 추가
+    v4.2: 예약주문 + WebSocket 지원
     """
     
     PRD_URL = "https://api.kiwoom.com"
@@ -26,6 +26,8 @@ class KiwoomUSClient:
     ACCOUNT_ENDPOINT = "/api/us/acnt"
     MARKET_ENDPOINT = "/api/us/mrkcond"
     STOCKINFO_ENDPOINT = "/api/us/stkinfo"
+    WEBSOCKET_URL = "wss://api.kiwoom.com:10000"
+    WEBSOCKET_MOCK_URL = "wss://mockapi.kiwoom.com:10000"
     
     # 거래소 코드 매핑
     EXCHANGE_MAP = {
@@ -103,7 +105,6 @@ class KiwoomUSClient:
         await self.client.aclose()
     
     # === 시세 API ===
-    
     async def get_stock_info(self, ticker: str, exchange: str = "ND") -> Dict:
         body = {
             "api_id": "usa10100",
@@ -194,9 +195,11 @@ class KiwoomUSClient:
         logger.info(f"주문 성공: ord_no={data.get('ord_no')}")
         return data
     
-    # 매수
     async def buy_loc(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
         return await self._order("ust20000", exchange, ticker, quantity, "30", price)
+    
+    async def buy_limit(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
+        return await self._order("ust20000", exchange, ticker, quantity, "00", price)
     
     async def buy_moo(self, ticker: str, quantity: int, exchange: str = "ND"):
         return await self._order("ust20000", exchange, ticker, quantity, "31")
@@ -204,12 +207,11 @@ class KiwoomUSClient:
     async def buy_moc(self, ticker: str, quantity: int, exchange: str = "ND"):
         return await self._order("ust20000", exchange, ticker, quantity, "32")
     
-    async def buy_limit(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
-        return await self._order("ust20000", exchange, ticker, quantity, "00", price)
-    
-    # 매도
     async def sell_loc(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
         return await self._order("ust20001", exchange, ticker, quantity, "30", price)
+    
+    async def sell_limit(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
+        return await self._order("ust20001", exchange, ticker, quantity, "00", price)
     
     async def sell_moo(self, ticker: str, quantity: int, exchange: str = "ND"):
         return await self._order("ust20001", exchange, ticker, quantity, "31")
@@ -217,11 +219,7 @@ class KiwoomUSClient:
     async def sell_moc(self, ticker: str, quantity: int, exchange: str = "ND"):
         return await self._order("ust20001", exchange, ticker, quantity, "32")
     
-    async def sell_limit(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
-        return await self._order("ust20001", exchange, ticker, quantity, "00", price)
-    
-    # === 예약주문 API (v4.1 추가) ===
-    
+    # === 예약주문 API (v4.2) ===
     async def buy_reserve(self, ticker: str, quantity: int, price: str,
                           start_date: str, end_date: str = "",
                           reserve_type: str = "1", exchange: str = "ND"):
@@ -303,7 +301,6 @@ class KiwoomUSClient:
         return response.json()
     
     # === 계좌/조회 API ===
-    
     async def get_balance(self) -> Dict:
         body = {"api_id": "ust21070"}
         headers = self._headers("ust21070")

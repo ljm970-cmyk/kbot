@@ -3,6 +3,7 @@
 import websockets
 import json
 import asyncio
+import ssl
 import logging
 from decimal import Decimal
 
@@ -12,6 +13,7 @@ logger = logging.getLogger(__name__)
 class KiwoomUSWebSocket:
     """
     키움증권 미국주식 WebSocket 실시간 시세
+    v4.2: STAR 장중 매도용
     """
     
     def __init__(self, access_token: str, app_key: str, is_mock: bool = False):
@@ -26,13 +28,10 @@ class KiwoomUSWebSocket:
         
         self.ws = None
         self.running = False
-        self.current_prices = {}  # {ticker: Decimal}
+        self.current_prices = {}
     
     async def connect(self):
         """WebSocket 연결"""
-        import ssl
-        
-        # SSL 설정 (실전만)
         ssl_context = ssl.create_default_context() if not self.is_mock else None
         
         headers = {
@@ -51,8 +50,8 @@ class KiwoomUSWebSocket:
     
     async def subscribe_stock(self, ticker: str = "TQQQ", tr_id: str = "FE"):
         """
-        실시간 시세 등록 (체결가)
-        tr_id: FE=체결가, FT=10호가
+        실시간 시세 등록
+        tr_id: F4=주문확인, F5=체결, FE=체결가, FT=10호가
         """
         msg = {
             "trnm": "SUBS",
@@ -61,15 +60,12 @@ class KiwoomUSWebSocket:
         }
         
         await self.ws.send(json.dumps(msg))
-        
         response = await self.ws.recv()
-        data = json.loads(response)
-        
         logger.info(f"실시간 등록: {ticker} ({tr_id})")
-        return data
+        return json.loads(response)
     
     async def unsubscribe_stock(self, ticker: str, tr_id: str = "FE"):
-        """실시간 해제"""
+        """실시간 시세 해제"""
         msg = {
             "trnm": "UNSUBS",
             "tr_id": tr_id,
@@ -80,7 +76,7 @@ class KiwoomUSWebSocket:
         logger.info(f"실시간 해제: {ticker}")
     
     async def receive_loop(self, callback=None):
-        """실시간 메시지 수신"""
+        """실시간 메시지 수신 루프"""
         while self.running:
             try:
                 message = await self.ws.recv()
@@ -106,7 +102,8 @@ class KiwoomUSWebSocket:
         return self.current_prices.get(ticker)
     
     async def close(self):
+        """WebSocket 연결 종료"""
         self.running = False
         if self.ws:
             await self.ws.close()
-            logger.info("WebSocket 종료")
+            logger.info("WebSocket 연결 종료")

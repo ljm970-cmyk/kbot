@@ -1,8 +1,7 @@
 """키움증권 미국주식 REST API 클라이언트"""
 
 import httpx
-from decimal import Decimal
-from typing import Optional, List, Dict
+from typing import Dict, List
 import logging
 
 logger = logging.getLogger(__name__)
@@ -27,7 +26,7 @@ class KiwoomUSClient:
     UST21110: 해외주식예수금
     """
     
-    # 공식 문서 기준: api.kiwoom.com (openapi 아님!)
+    # 공식 문서 기준: api.kiwoom.com
     PRD_URL = "https://api.kiwoom.com"
     MOCK_URL = "https://mockapi.kiwoom.com"
     
@@ -40,7 +39,7 @@ class KiwoomUSClient:
         "AMEX": "NA",
         "NASDAQ": "ND",
         "NYSE": "NY",
-        "NASD": "ND",  # 별칭
+        "NASD": "ND",
     }
     
     def __init__(
@@ -55,7 +54,6 @@ class KiwoomUSClient:
         self.app_secret = app_secret
         self.access_token = access_token
         
-        # base_url 우선순위: 주입값 > mock 분기 > 기본값
         if base_url:
             self.base_url = base_url
         else:
@@ -115,32 +113,24 @@ class KiwoomUSClient:
     def _get_exchange_code(self, exchange_hint: str = "") -> str:
         if exchange_hint:
             return self.EXCHANGE_MAP.get(exchange_hint.upper(), "ND")
-        return "ND"  # 기본 NASDAQ
-    
-    def _guess_exchange(self, ticker: str) -> str:
-        """티커로 거래소 추정 (기본 NASDAQ)"""
         return "ND"
     
-    # === 주문 API ===
+    def _guess_exchange(self, ticker: str) -> str:
+        return "ND"  # 기본 NASDAQ
     
+    # === 주문 API ===
     async def _order(self, api_id: str, exchange: str, ticker: str,
                      quantity: int, trade_type: str, price: str = "") -> Dict:
-        """
-        미국주식 주문 공통
-        
-        trade_type: 00=지정가, 03=시장가, 30=LOC, 31=MOO, 32=MOC
-        """
         body = {
             "api_id": api_id,
-            "stex_tp": exchange,         # 거래소구분 (NA/ND/NY)
-            "stk_cd": ticker,             # 종목코드
-            "ord_qty": str(quantity),     # 주문수량
-            "trde_tp": trade_type,        # 해외매매구분
+            "stex_tp": exchange,
+            "stk_cd": ticker,
+            "ord_qty": str(quantity),
+            "trde_tp": trade_type,
         }
         
-        # 지정가, LOC 등 가격 필요
         if trade_type in ("00", "30") and price:
-            body["ord_uv"] = str(price)   # 주문단가
+            body["ord_uv"] = str(price)
         
         headers = self._headers(api_id=api_id)
         
@@ -154,7 +144,6 @@ class KiwoomUSClient:
         response.raise_for_status()
         data = response.json()
         
-        # 결과 확인
         ret_code = data.get("return_code", -1)
         ret_msg = data.get("return_msg", "unknown")
         
@@ -165,42 +154,34 @@ class KiwoomUSClient:
         logger.info(f"주문 성공: ord_no={data.get('ord_no')}")
         return data
     
+    # 매수
     async def buy_loc(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
-        """LOC 매수 - ust20000"""
         return await self._order("ust20000", exchange, ticker, quantity, "30", price)
     
     async def buy_moo(self, ticker: str, quantity: int, exchange: str = "ND"):
-        """MOO 매수 - ust20000"""
         return await self._order("ust20000", exchange, ticker, quantity, "31")
     
     async def buy_moc(self, ticker: str, quantity: int, exchange: str = "ND"):
-        """MOC 매수 - ust20000"""
         return await self._order("ust20000", exchange, ticker, quantity, "32")
     
     async def buy_limit(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
-        """지정가 매수 - ust20000"""
         return await self._order("ust20000", exchange, ticker, quantity, "00", price)
     
+    # 매도
     async def sell_loc(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
-        """LOC 매도 - ust20001"""
         return await self._order("ust20001", exchange, ticker, quantity, "30", price)
     
     async def sell_moo(self, ticker: str, quantity: int, exchange: str = "ND"):
-        """MOO 매도 - ust20001"""
         return await self._order("ust20001", exchange, ticker, quantity, "31")
     
     async def sell_moc(self, ticker: str, quantity: int, exchange: str = "ND"):
-        """MOC 매도 - ust20001"""
         return await self._order("ust20001", exchange, ticker, quantity, "32")
     
     async def sell_limit(self, ticker: str, quantity: int, price: str, exchange: str = "ND"):
-        """지정가 매도 - ust20001"""
         return await self._order("ust20001", exchange, ticker, quantity, "00", price)
     
     # === 계좌/조회 API ===
-    
     async def get_balance(self) -> Dict:
-        """미국주식 원장잔고확인 - ust21070"""
         body = {"api_id": "ust21070"}
         headers = self._headers("ust21070")
         
@@ -213,7 +194,6 @@ class KiwoomUSClient:
         return response.json()
     
     async def get_unfilled_orders(self) -> List[Dict]:
-        """미국주식 원장미체결 - ust21050"""
         body = {"api_id": "ust21050"}
         headers = self._headers("ust21050")
         
@@ -226,7 +206,6 @@ class KiwoomUSClient:
         return response.json().get("output", [])
     
     async def get_trade_history(self) -> List[Dict]:
-        """미국주식 거래내역 - ust21100"""
         body = {"api_id": "ust21100"}
         headers = self._headers("ust21100")
         
@@ -239,7 +218,6 @@ class KiwoomUSClient:
         return response.json().get("output", [])
     
     async def get_deposit(self) -> Dict:
-        """해외주식 예수금 - ust21110"""
         body = {"api_id": "ust21110"}
         headers = self._headers("ust21110")
         
@@ -252,28 +230,19 @@ class KiwoomUSClient:
         return response.json()
 
 
-# === V4 전략 실행기 ===
-
 class V4OrderExecutor:
     def __init__(self, client: KiwoomUSClient):
         self.client = client
     
     async def execute_buy_with_big_number_fallback(self, ticker: str, quantity: int, price: str):
-        """큰수매수: LOC 지정가 매수"""
         return await self.client.buy_loc(ticker, quantity, price)
     
     async def execute_sell_order_loc(self, ticker: str, price: str, quantity: int):
-        """LOC 매도"""
         return await self.client.sell_loc(ticker, quantity, price)
     
     async def execute_sell_order_moc(self, ticker: str, quantity: int):
-        """MOC 매도"""
         return await self.client.sell_moc(ticker, quantity)
     
     async def execute_sell_order_gtc(self, ticker: str, price: str, quantity: int):
-        """
-        GTC 매도 (Good Till Cancelled)
-        키움 API에 GTC 없음 → LOC + 내부 재주문 관리로 구현
-        """
         logger.warning("GTC는 LOC로 대체, 미체결 시 다음날 재주문 필요")
         return await self.client.sell_loc(ticker, quantity, price)

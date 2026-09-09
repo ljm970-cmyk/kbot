@@ -19,7 +19,6 @@ class BotConfig:
 def load_config(logger):
     """.env 파일에서 설정 로드"""
     
-    # .env 파일 로드
     env_path = ".env"
     if os.path.exists(env_path):
         with open(env_path) as f:
@@ -52,7 +51,6 @@ def load_config(logger):
         app_secret = os.getenv("APP_SECRET_MOCK", "")
         logger.info("모의투자 모드")
     else:
-        # 주의: 공식 문서 기준 api.kiwoom.com (openapi 아님!)
         base_url = os.getenv("PRD", "https://api.kiwoom.com")
         app_key = os.getenv("APP_KEY", "")
         app_secret = os.getenv("APP_SECRET", "")
@@ -68,8 +66,7 @@ def load_config(logger):
             raise ValueError("실전 APP_SECRET 필요")
     
     # 토큰: .env에 저장된 경우 (선택사항), 없으면 런타임 발급
-    access_token = os.getenv("KIWOOM_ACCESS_TOKEN", "")  # 오타 수정: KIWOOOM → KIWOOM
-    
+    access_token = os.getenv("KIWOOM_ACCESS_TOKEN", "")
     if not access_token:
         logger.info("KIWOOM_ACCESS_TOKEN 없음 - 봇 실행 시 토큰 발급 예정")
     
@@ -78,7 +75,7 @@ def load_config(logger):
     return BotConfig(
         telegram_token=token,
         chat_ids=chat_ids,
-        kiwoom_token=access_token,  # 변수명 변경없이 값만 교체
+        kiwoom_token=access_token,
         is_mock=is_mock,
         app_key=app_key,
         app_secret=app_secret,

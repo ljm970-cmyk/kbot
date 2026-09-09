@@ -40,11 +40,25 @@ class PremarketDelayScheduler:
         from ..market.market_session import USMarketSession
         return USMarketSession.is_summer_time(check_date)
     
-    async def _get_current_price(self) -> Decimal:
-        """현재 시세 조회 (TODO: 시세 API 구현)"""
-        # TODO: 실제 시세 API 연결
-        # 임시값 - 실제 구현 필요
-        return Decimal("100")
+    async def _get_current_price(self, ticker: str = "TQQQ") -> Decimal:
+        """
+        현재 시세 조회 - usa20100 사용
+        """
+        try:
+            result = await self.executor.client.get_current_price(ticker)
+            
+            # 응답 파싱 - 실제 응답 구조에 맞게 수정 필요
+            price_str = result.get("output", {}).get("last", "0")
+            if not price_str:
+                price_str = result.get("last", "0")
+            
+            price = Decimal(str(price_str))
+            logger.info(f"현재가: {ticker} = {price}")
+            return price
+            
+        except Exception as e:
+            logger.error(f"시세 조회 실패: {e}")
+            raise
     
     async def _place_orders(self):
         """프리장 주문 실행"""
@@ -54,8 +68,9 @@ class PremarketDelayScheduler:
             await self.telegram.send_message("🚀 프리장 주문 시작")
         
         try:
-            # 1. 현재 시세 (TODO: 실제 API)
-            current_price = await self._get_current_price()
+            # 1. 현재 시세
+            ticker = self.portfolio.cfg.ticker
+            current_price = await self._get_current_price(ticker)
             
             # 2. 잔고 확인
             balance = await self.executor.client.get_balance()
@@ -66,6 +81,8 @@ class PremarketDelayScheduler:
             
             if not orders:
                 logger.info("주문 없음")
+                if self.telegram:
+                    await self.telegram.send_message("ℹ️ 주문 없음 (STAR 미달 또는 분할 완료)")
                 return
             
             # 4. 주문 실행
@@ -97,13 +114,16 @@ class PremarketDelayScheduler:
                             quantity=quantity
                         )
                 
-                # 알림
+                # 결과 알림
                 if self.telegram:
                     status = "✅" if result.get("return_code") == 0 else "❌"
-                    await self.telegram.send_message(
-                        f"{status} {side.upper()}: {ticker} {quantity}주\n"
-                        f"주문번호: {result.get('ord_no', 'N/A')}"
+                    reason = order.get("reason", "")
+                    msg = (
+                        f"{status} {side.upper()}: {ticker} {quantity}주 @ {price}\n"
+                        f"주문번호: {result.get('ord_no', 'N/A')}\n"
+                        f"사유: {reason}"
                     )
+                    await self.telegram.send_message(msg)
                     
         except Exception as e:
             logger.error(f"주문 배치 실패: {e}", exc_info=True)

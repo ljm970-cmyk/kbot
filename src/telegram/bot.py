@@ -61,50 +61,122 @@ class V4TelegramBot:
                 )
             )
 
-        # ------------------- 새로 추가하는 수수료 수신 핸들러 -------------------
+        # ------------------- 설정 마법사 핸들러 (Step 1 ~ 5) -------------------
+        # Step 1: 수수료율
         @self.dp.message(SetupWizard.FEE)
         async def process_fee(message: types.Message, state: FSMContext):
             if message.chat.id not in self.allowed_chats:
                 return
-        
+
             text = message.text.strip()
             if text == "❌ 취소":
                 await state.clear()
-                await message.answer("설정이 취소되었습니다.", reply_markup=ReplyKeyboardRemove())
+                await message.answer(
+                    "설정이 취소되었습니다.", reply_markup=ReplyKeyboardRemove()
+                )
                 return
-        
+
             try:
                 fee = float(text)
                 await state.update_data(fee=fee)
-                await state.set_state(SetupWizard.COMPOUND)  # 다음 Step으로 이동
+                await state.set_state(SetupWizard.COMPOUND)
                 await message.answer(
                     f"✅ 수수료율({fee})이 설정되었습니다.\n\nStep 2/5: 복리 설정 (예: 1.0)",
-                    reply_markup=ReplyKeyboardRemove()
+                    reply_markup=ReplyKeyboardRemove(),
                 )
             except ValueError:
-                await message.answer("올바른 숫자 형식으로 입력해 주세요. (예: 0.015)")
-    # --------------------------------------------------------------------
-        
+                await message.answer(
+                    "올바른 숫자 형식으로 입력해 주세요. (예: 0.015)"
+                )
+
+        # Step 2: 복리 설정
+        @self.dp.message(SetupWizard.COMPOUND)
+        async def process_compound(message: types.Message, state: FSMContext):
+            if message.chat.id not in self.allowed_chats:
+                return
+            try:
+                compound = float(message.text.strip())
+                await state.update_data(compound=compound)
+                await state.set_state(SetupWizard.SEED)
+                await message.answer(
+                    f"✅ 복리({compound}) 설정 완료.\n\nStep 3/5: 시드머니 ($ 단위, 예: 20000)"
+                )
+            except ValueError:
+                await message.answer(
+                    "올바른 숫자 형식으로 입력해 주세요. (예: 1.0)"
+                )
+
+        # Step 3: 시드머니
+        @self.dp.message(SetupWizard.SEED)
+        async def process_seed(message: types.Message, state: FSMContext):
+            if message.chat.id not in self.allowed_chats:
+                return
+            try:
+                seed = float(message.text.strip())
+                await state.update_data(seed=seed)
+                await state.set_state(SetupWizard.SPLITS)
+                await message.answer(
+                    f"✅ 시드머니(${seed}) 설정 완료.\n\nStep 4/5: 분할 횟수 (예: 20)"
+                )
+            except ValueError:
+                await message.answer(
+                    "올바른 숫자 형식으로 입력해 주세요. (예: 20000)"
+                )
+
+        # Step 4: 분할 횟수
+        @self.dp.message(SetupWizard.SPLITS)
+        async def process_splits(message: types.Message, state: FSMContext):
+            if message.chat.id not in self.allowed_chats:
+                return
+            try:
+                splits = int(message.text.strip())
+                await state.update_data(splits=splits)
+                await state.set_state(SetupWizard.TICKER)
+                await message.answer(
+                    f"✅ 분할 횟수({splits}회) 설정 완료.\n\nStep 5/5: 매매 종목 티커 (예: TQQQ, SOXL)"
+                )
+            except ValueError:
+                await message.answer("정수로 입력해 주세요. (예: 20)")
+
+        # Step 5: 티커 입력 및 완료
+        @self.dp.message(SetupWizard.TICKER)
+        async def process_ticker(message: types.Message, state: FSMContext):
+            if message.chat.id not in self.allowed_chats:
+                return
+            ticker = message.text.strip().upper()
+            data = await state.get_data()
+            await state.clear()
+
+            summary = (
+                f"🎉 설정 완료!\n\n"
+                f"• 티커: {ticker}\n"
+                f"• 시드: ${data.get('seed')}\n"
+                f"• 분할: {data.get('splits')}회\n"
+                f"• 복리: {data.get('compound')}\n"
+                f"• 수수료: {data.get('fee')}"
+            )
+            await message.answer(summary)
+
+        # ----------------------------------------------------------------------
+
         @self.dp.message(Command("checkkst"))
         async def cmd_check_kst(message: types.Message):
-            from zoneinfo import ZoneInfo
             KST = ZoneInfo("Asia/Seoul")
             now = datetime.now(KST)
             await message.answer(
                 f"🔍 KST: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
                 f"TZ env: {os.environ.get('TZ', '미설정')}"
             )
-    
+
     async def start(self):
         await self.dp.start_polling(self.bot)
-    
+
     async def send_alert(self, text: str):
         for chat_id in self.allowed_chats:
             try:
                 await self.bot.send_message(chat_id=chat_id, text=text)
             except Exception as e:
                 logger.error(f"알림 실패: {e}")
-
 
 from datetime import datetime
 import os

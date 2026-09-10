@@ -60,6 +60,30 @@ class V4TelegramBot:
                     resize_keyboard=True
                 )
             )
+
+        # ------------------- 새로 추가하는 수수료 수신 핸들러 -------------------
+        @self.dp.message(SetupWizard.FEE)
+        async def process_fee(message: types.Message, state: FSMContext):
+            if message.chat.id not in self.allowed_chats:
+                return
+        
+            text = message.text.strip()
+            if text == "❌ 취소":
+                await state.clear()
+                await message.answer("설정이 취소되었습니다.", reply_markup=ReplyKeyboardRemove())
+                return
+        
+            try:
+                fee = float(text)
+                await state.update_data(fee=fee)
+                await state.set_state(SetupWizard.COMPOUND)  # 다음 Step으로 이동
+                await message.answer(
+                    f"✅ 수수료율({fee})이 설정되었습니다.\n\nStep 2/5: 복리 설정 (예: 1.0)",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+            except ValueError:
+                await message.answer("올바른 숫자 형식으로 입력해 주세요. (예: 0.015)")
+    # --------------------------------------------------------------------
         
         @self.dp.message(Command("checkkst"))
         async def cmd_check_kst(message: types.Message):

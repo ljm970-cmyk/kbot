@@ -138,25 +138,63 @@ class V4TelegramBot:
             except ValueError:
                 await message.answer("정수로 입력해 주세요. (예: 20)")
 
-        # Step 5: 티커 입력 및 완료
-        @self.dp.message(SetupWizard.TICKER)
-        async def process_ticker(message: types.Message, state: FSMContext):
-            if message.chat.id not in self.allowed_chats:
-                return
-            ticker = message.text.strip().upper()
-            data = await state.get_data()
-            await state.clear()
+    # Step 5: 티커 입력 및 완료 (설정값 .env 자동 저장 추가)
+    @self.dp.message(SetupWizard.TICKER)
+    async def process_ticker(message: types.Message, state: FSMContext):
+        if message.chat.id not in self.allowed_chats:
+            return
+        ticker = message.text.strip().upper()
+        data = await state.get_data()
+        await state.clear()
 
-            summary = (
-                f"🎉 설정 완료!\n\n"
-                f"• 티커: {ticker}\n"
-                f"• 시드: ${data.get('seed')}\n"
-                f"• 분할: {data.get('splits')}회\n"
-                f"• 복리: {data.get('compound')}\n"
-                f"• 수수료: {data.get('fee')}"
-            )
-            await message.answer(summary)
+        fee = data.get('fee', 0.015)
+        compound = data.get('compound', 1.0)
+        seed = data.get('seed', 10000)
+        splits = data.get('splits', 20)
 
+        # .env 파일에 설정값 반영
+        env_path = ".env"
+        env_vars = {
+            "V4_TICKER": str(ticker),
+            "V4_SEED": str(seed),
+            "V4_SPLITS": str(splits),
+            "V4_COMPOUND": str(compound),
+            "V4_FEE": str(fee),
+        }
+
+        # .env 파일 업데이트 로직
+        lines = []
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        
+        new_lines = []
+        updated_keys = set()
+        for line in lines:
+            key = line.split("=")[0].strip() if "=" in line else ""
+            if key in env_vars:
+                new_lines.append(f"{key}={env_vars[key]}\n")
+                updated_keys.add(key)
+            else:
+                new_lines.append(line)
+        
+        for key, val in env_vars.items():
+            if key not in updated_keys:
+                new_lines.append(f"{key}={val}\n")
+
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+
+        summary = (
+            f"🎉 설정 완료 및 .env 저장 성공!\n\n"
+            f"• 티커: {ticker}\n"
+            f"• 시드: ${seed}\n"
+            f"• 분할: {splits}회\n"
+            f"• 복리: {compound}\n"
+            f"• 수수료: {fee}\n\n"
+            f"💡 미국 정규장(22:30/23:30)에 키움 API를 통해 자동 주문이 진행됩니다."
+        )
+        await message.answer(summary)
         # ----------------------------------------------------------------------
 
         @self.dp.message(Command("checkkst"))

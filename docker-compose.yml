@@ -1,0 +1,16 @@
+version: '3.8'
+services:
+  infinite-buy:
+    build: .
+    container_name: kbot_v4
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - trading
+networks:
+  trading:
+    driver: bridge

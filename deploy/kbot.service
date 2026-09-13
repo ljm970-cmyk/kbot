@@ -1,0 +1,63 @@
+# /etc/systemd/system/kbot.service
+# ============================================================
+# kbot systemd 서비스 파일
+# 
+# 설치:
+#   sudo cp deploy/kbot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable kbot
+#   sudo systemctl start kbot
+#
+# 관리:
+#   sudo systemctl status kbot    # 상태 확인
+#   sudo systemctl restart kbot   # 재시작
+#   sudo journalctl -u kbot -f    # 실시간 로그
+# ============================================================
+
+[Unit]
+Description=kbot - 무한매수법 자동 매매 시스템
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+# 작업 디렉토리
+WorkingDirectory=/opt/kbot
+
+# 환경 변수
+Environment="PYTHONPATH=/opt/kbot"
+Environment="TZ=Asia/Seoul"
+
+# 가상환경 Python 경로
+ExecStart=/opt/kbot/venv/bin/python /opt/kbot/main.py
+
+# 종료 시그널
+ExecStop=/bin/kill -TERM $MAINPID
+KillMode=process
+
+# 재시작 정책
+Restart=always
+RestartSec=10
+StartLimitInterval=60s
+StartLimitBurst=3
+
+# 리소스 제한
+MemoryLimit=1G
+CPUQuota=80%
+
+# 로그
+StandardOutput=append:/var/log/kbot/app.log
+StandardError=append:/var/log/kbot/error.log
+SyslogIdentifier=kbot
+
+# 보안
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/kbot/data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,39 @@
+# ============================================================
+# KBOT .gitignore
+# ============================================================
+
+# Environment files (actual secrets)
+.env
+.env.production
+.env.local
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data files (runtime generated)
+data/**/*.json
+data/**/*.db
+!data/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

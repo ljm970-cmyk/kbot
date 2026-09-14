@@ -120,7 +120,7 @@ class ReverseMode(BaseTradingMode):
                 state['reverse_first_day'] = False
             else:
                 # 이후 매도: 비율 감소
-                remaining_ratio = (state['holdings'] + qty) / max(state['holdings'], 1)
+                remaining_ratio = state['holdings'] / (state['holdings'] + qty) if (state['holdings'] + qty) > 0 else 1
                 result = calc.sell_reverse(remaining_ratio)
             
             state['T'] = result.t_after

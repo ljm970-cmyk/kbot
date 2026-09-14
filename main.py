@@ -99,7 +99,7 @@ async def main_async():
     from kiwoom.api_client import KiwoomAPIClient
     from kiwoom.websocket_handler import WebSocketFillReceiver
     from scheduler.engine import SchedulerEngine
-    from telegram.bot import create_telegram_bot
+    from tg_bot.bot import create_telegram_bot
     
     # 상태 관리
     state_mgr = StateManager()

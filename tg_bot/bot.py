@@ -23,8 +23,8 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.settings import AppConfig
-from telegram.commands_handler import CommandsHandler
-from telegram.setup_wizard import SetupWizard
+from tg_bot.commands_handler import CommandsHandler
+from tg_bot.setup_wizard import SetupWizard
 
 logger = logging.getLogger("kbot.telegram")
 
@@ -34,7 +34,7 @@ class KbotTelegramBot:
     텔레그램 봇 메인 컨트롤러
     
     사용법 (main.py에서):
-        from telegram.bot import KbotTelegramBot
+        from tg_bot.bot import KbotTelegramBot
         from core.state_manager import StateManager
         from kiwoom.api_client import KiwoomAPIClient
         
@@ -152,6 +152,7 @@ class KbotTelegramBot:
     
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """InlineKeyboardButton 콜백"""
+        logger.info(f"[콜백수신] data={update.callback_query.data if update.callback_query else None}")
         query = update.callback_query
         await query.answer()
         
@@ -219,7 +220,7 @@ class KbotTelegramBot:
         )
         await update.effective_message.reply_text(msg, parse_mode='HTML')
     
-    def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+    async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         """에러 핸들러"""
         logger.error(f"텔레그램 에러: {context.error}")
     
@@ -233,7 +234,7 @@ class KbotTelegramBot:
         
         await self.application.initialize()
         await self.application.start()
-        await self.application.updater.start_polling()
+        await self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         
         try:
             while True:
@@ -257,7 +258,7 @@ async def create_telegram_bot(config: AppConfig,
     KBOT 텔레그램 봇 팩토리
     
     사용법:
-        from telegram.bot import create_telegram_bot
+        from tg_bot.bot import create_telegram_bot
         from config.settings import ConfigLoader
         from core.state_manager import StateManager
         from kiwoom.api_client import KiwoomAPIClient

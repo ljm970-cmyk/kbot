@@ -53,19 +53,19 @@ class KiwoomAPIClient:
             성공 여부
         """
         try:
-            url = f"{self.base_url}/api/oauth2/token"
+            url = f"{self.base_url}/oauth2/token"
             
             payload = {
                 "grant_type": "client_credentials",
                 "appkey": self.config.app_key,
-                "appsecret": self.config.app_secret,
+                "secretkey": self.config.app_secret,
             }
             
             response = requests.post(url, json=payload, timeout=30)
             data = response.json()
             
-            if response.status_code == 200 and 'access_token' in data:
-                self.token = data['access_token']
+            if response.status_code == 200 and 'token' in data:
+                self.token = data['token']
                 # expires_in 기반 만료 시각 설정
                 expires_in = data.get('expires_in', 86400)
                 self.token_expiry = datetime.now().timestamp() + expires_in - 300  # 5분 여유

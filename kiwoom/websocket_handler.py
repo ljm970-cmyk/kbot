@@ -58,7 +58,7 @@ class WebSocketFillReceiver:
     """
     
     # 운영만 사용 (모의투자 제거)
-    WS_URL = "wss://api.kiwoom.com:10000"
+    WS_URL = "wss://api.kiwoom.com:10000/api/us/websocket"
     
     def __init__(self, access_token: str, db_path: str = "data/fills/realtime_fills.db"):
         self.access_token = access_token
@@ -125,6 +125,19 @@ class WebSocketFillReceiver:
             ) as ws:
                 self.ws = ws
                 logger.info(f"WebSocket 연결: {self.WS_URL}")
+
+                # LOGIN 인증 (REG보다 먼저 필요)
+                login_msg = {
+                    "trnm": "LOGIN",
+                    "token": self.access_token
+                }
+                await ws.send(json.dumps(login_msg))
+                login_resp = json.loads(await ws.recv())
+                logger.info(f"LOGIN 응답: {login_resp}")
+                
+                if login_resp.get("return_code") != 0:
+                    logger.error(f"LOGIN 실패: {login_resp.get('return_msg')}")
+                    return
                 
                 # F5 실시간 체결 등록 [1]
                 reg_msg = {
@@ -133,7 +146,7 @@ class WebSocketFillReceiver:
                     "refresh": "0",
                     "data": [
                         {
-                            "item": [""],  # 전체 종목
+                            "item": [{"jmcode": "", "stex_tp": "ND"}],  # 전체 종목
                             "type": ["F5"]  # 실시간 체결
                         }
                     ]
@@ -145,7 +158,7 @@ class WebSocketFillReceiver:
                 await self._receive_loop(ws)
                 
         except Exception as e:
-            logger.error(f"WebSocket 연결 오류: {e}")
+            logger.error(f"WebSocket 연결 오류: {type(e).__name__}: {e!r}", exc_info=True)
             # 재연결 지연
             await asyncio.sleep(10)
             if self.running:
@@ -164,7 +177,7 @@ class WebSocketFillReceiver:
                 except:
                     break
             except websockets.exceptions.ConnectionClosed:
-                logger.warning("WebSocket 연결 종료")
+                logger.warning(f"WebSocket 연결 종료: code={ws.close_code}, reason={ws.close_reason}")
                 break
             except Exception as e:
                 logger.error(f"수신 오류: {e}")
@@ -196,6 +209,9 @@ class WebSocketFillReceiver:
         elif trnm == "PONG":
             pass  # 핑퐁 응답
         
+        elif trnm == "REG":
+            logger.info(f"REG 응답: {msg}")
+
         elif trnm.startswith("CLOSE"):
             logger.warning(f"서버 종료 신호: {msg}")
     

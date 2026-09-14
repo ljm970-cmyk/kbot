@@ -95,7 +95,7 @@ class StateManager:
     def get_user_tickers(self, user_id: str) -> list[str]:
         """사용자의 활성 종목 목록"""
         pattern = f"{user_id}_*_config.json"
-        configs = list(self.DATA_DIR / "config" / pattern)
+        configs = list((self.DATA_DIR / "config").glob(pattern))
         
         tickers = []
         for cfg_path in configs:

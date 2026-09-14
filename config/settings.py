@@ -95,7 +95,7 @@ class ConfigLoader:
         # 키움 설정
         kiwoom = KiwoomConfig(
             api_base=os.getenv("KIWOOM_API_BASE", "https://api.kiwoom.com"),
-            ws_url=os.getenv("KIWOOM_WS_URL", "wss://api.kiwoom.com:10000"),
+            ws_url=os.getenv("KIWOOM_WS_URL", "wss://api.kiwoom.com:10000/api/us/websocket"),
             app_key=os.getenv("KIWOOM_APP_KEY", "").strip(),
             app_secret=os.getenv("KIWOOM_APP_SECRET", "").strip(),
         )

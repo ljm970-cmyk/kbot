@@ -227,12 +227,14 @@ class EndOfDayCalculator:
                 result = calc.add_buy_normal(ratio)
             else:
                 result = calc.add_quarter_buy_reverse()
-            
+
+            state['T'] = result.t_after
+
         else:  # sell
             # 잔금 증가
             state['cash'] += (trade_amount - fee)
             state['holdings'] -= qty
-            
+
             # T값
             if state['mode'] == 'normal':
                 result = calc.apply_quarter_sell_normal()
@@ -243,14 +245,14 @@ class EndOfDayCalculator:
                 else:
                     ratio = state['holdings'] / (state['holdings'] + qty) if (state['holdings'] + qty) > 0 else 1
                     result = calc.sell_reverse(ratio)
-            
+
+            state['T'] = result.t_after
+
             # 일반모드 종료
             if state['mode'] == 'normal' and state['holdings'] <= 0:
                 state['holdings'] = 0
                 state['avg_price'] = 0
                 state['T'] = 0
-        
-        state['T'] = result.t_after
         
         return {
             'fill': {
@@ -261,6 +263,6 @@ class EndOfDayCalculator:
                 'fee': fee
             },
             'T_before': before_T,
-            'T_after': result.t_after,
+            'T_after': state['T'],
             'calc_detail': result.detail
         }

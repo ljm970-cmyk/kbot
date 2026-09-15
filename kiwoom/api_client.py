@@ -693,8 +693,37 @@ class KiwoomAPIClient:
             )
         return await self.reserve_sell(ticker, exchange, qty, TradeType.LIMIT, price)
 
+    #: 예약주문 취소 가능 시간대 (KST). 문서에 없는 제약이며 실측으로 확인했다.
+    #: 이 시간을 벗어나면 "예약 취소 가능시간은 [AM 08:00] ~ [PM 10:25] 입니다" 로 거부된다.
+    CANCEL_WINDOW = (8, 22)      # 08:00 ~ 22:25
+
+    def can_cancel_now(self) -> bool:
+        """지금 예약주문을 취소할 수 있는지.
+
+        EOD 정산은 05:30(서머타임)에 도는데 그 시각에는 취소가 불가능하다.
+        정정이 필요하면 08시 이후로 미뤄야 한다.
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Asia/Seoul"))
+        lo, hi = self.CANCEL_WINDOW
+        if now.hour < lo:
+            return False
+        if now.hour > hi:
+            return False
+        if now.hour == hi and now.minute > 25:
+            return False
+        return True
+
     async def cancel_reserved(self, rsrv_dt: str, rsrv_ord_no: str, ticker: str, exchange: str) -> dict:
-        """예약주문 취소 (ust21203). 예약 '정정' API 는 없으므로 취소 후 재접수한다."""
+        """예약주문 취소 (ust21203).
+
+        예약 '정정' API 는 없으므로 취소 후 재접수한다.
+        취소 가능 시간은 08:00~22:25 KST 다 (문서에 없는 제약).
+        """
+        if not self.can_cancel_now():
+            logger.warning("예약주문 취소 가능시간(08:00~22:25 KST)이 아닙니다. "
+                           "요청은 보내지만 거부될 수 있습니다.")
         body = {
             "rsrv_dt": rsrv_dt,
             "rsrv_ord_no": str(rsrv_ord_no),
@@ -719,6 +748,19 @@ class KiwoomAPIClient:
             proc_tp   0:미처리 / 1:정상처리 / 9:처리중에러
             err_cntn  처리내역 (거부 사유가 여기 들어온다)
         """
+        # 실측으로 확인된 조회 규칙 (문서와 다름):
+        #
+        #  1. base_dt_tp 와 날짜는 짝이 맞아야 한다.
+        #     - base_dt_tp=1(예약등록일) + 날짜 빈값       → 조회됨
+        #     - base_dt_tp=0(주문전송일) + 날짜 명시       → 조회됨
+        #     - 그 외 조합은 "자료가 존재하지 않습니다"
+        #  2. stk_cd 와 stex_tp 는 둘 다 넣거나 둘 다 빼야 한다.
+        #     하나만 넣으면 형식 오류. 다만 둘 다 넣으면 결과가 비므로
+        #     종목 필터는 쓰지 않고 전체 조회 후 걸러낸다.
+        if fr_dt or to_dt:
+            base_dt_tp = "0"          # 주문전송일 기준
+        else:
+            base_dt_tp = "1"          # 예약등록일 기준
         body = {
             "fr_rsrv_dt": fr_dt,
             "to_rsrv_dt": to_dt,
@@ -727,14 +769,18 @@ class KiwoomAPIClient:
             "rsrv_cncl_yn": "0" if include_cancelled else "N",
             "rsrv_proc_tp": "%",
             "slby_tp": SideFilter.ALL,
-            "stex_tp": exchange,
-            "stk_cd": ticker,
+            "stex_tp": "",
+            "stk_cd": "",
             # 문서상 Required=N 이고 예제도 빈 문자열이지만, 실제로는
             # 비워 보내면 "기준일구분값을 확인하십시요" 로 거부된다.
             # 0:주문전송일 — 그날 실제로 나갈 주문을 보는 것이 목적이다.
-            "base_dt_tp": "0",
+            "base_dt_tp": base_dt_tp,
         }
-        return await self.request_all("ust21205", self.PATH_ORDER, body)
+        rows = await self.request_all("ust21205", self.PATH_ORDER, body)
+        if ticker:
+            rows = [r for r in rows
+                    if str(r.get("stk_cd", "")).upper() == ticker.upper()]
+        return rows
 
     async def verify_reserved_orders(self, ticker: str = "", exchange: str = "") -> list[dict]:
         """접수한 예약주문 중 거부/에러가 난 건만 골라낸다.
@@ -747,8 +793,17 @@ class KiwoomAPIClient:
         for r in rows:
             proc = str(_pick(r, "proc_tp"))
             cancelled = str(_pick(r, "rsrv_cncl_yn"))
-            # proc_tp 는 코드('9') 또는 라벨('처리중에러')로 올 수 있다
-            if "에러" in proc or proc == "9" or "취소" in cancelled or "무효" in cancelled:
+
+            # 실측: 값이 코드가 아니라 한글 라벨로 온다.
+            #   proc_tp        "미처리" / "정상처리" / "처리중에러"
+            #   rsrv_cncl_yn   "미취소" / "취소" / "무효"
+            #
+            # "미취소" 에 "취소" 가 들어 있어 부분 문자열로 판정하면
+            # 정상 주문을 매일 거부로 신고한다. 부정형을 먼저 걸러낸다.
+            is_error = "에러" in proc or proc == "9"
+            is_dead = (not cancelled.startswith("미")
+                       and ("취소" in cancelled or "무효" in cancelled))
+            if is_error or is_dead:
                 bad.append({
                     "rsrv_ord_no": _pick(r, "rsrv_ord_no"),
                     "stk_cd": _pick(r, "stk_cd"),

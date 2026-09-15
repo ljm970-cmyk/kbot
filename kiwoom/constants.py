@@ -75,7 +75,7 @@ class SideFilter:
 #: KiwoomAPIClient.resolve_exchange("SOXL") 로 실측해 확정할 것.
 EXCHANGE_MAP: dict[str, str] = {
     "TQQQ": Exchange.NASDAQ,
-    "SOXL": Exchange.AMEX,   # ← 미확정
+    "SOXL": Exchange.NYSE,   # 실측 확인 2026-09-16 (NYSE Arca)
 }
 
 

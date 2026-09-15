@@ -238,6 +238,14 @@ class KiwoomAPIClient:
     #: 요청 간 최소 간격(초) — 키움 유량 제한 대비
     MIN_INTERVAL = 0.2
 
+    #: User-Agent.
+    #:
+    #: 키움 앞단 WAF 가 aiohttp 기본 UA(Python/3.x aiohttp/3.x)를 차단한다.
+    #: 헤더 없이 보내면 API 가 아니라 방화벽이 HTML 400 "Request Blocked" 를
+    #: 돌려주므로 응답 파싱부터 실패한다. 문서에 없는 사항이라
+    #: 실제 호출로만 확인된다.
+    USER_AGENT = "Mozilla/5.0 (compatible; kbot/1.0)"
+
     def __init__(
         self,
         app_key: Any,
@@ -316,7 +324,11 @@ class KiwoomAPIClient:
             "secretkey": self.app_secret,
         }
 
-        async with session.post(url, json=payload) as resp:
+        headers = {
+            "Content-Type": "application/json;charset=UTF-8",
+            "User-Agent": self.USER_AGENT,
+        }
+        async with session.post(url, json=payload, headers=headers) as resp:
             try:
                 data = await resp.json(content_type=None)
             except Exception as e:
@@ -368,8 +380,12 @@ class KiwoomAPIClient:
             "secretkey": self.app_secret,
             "token": self.token,
         }
+        headers = {
+            "Content-Type": "application/json;charset=UTF-8",
+            "User-Agent": self.USER_AGENT,
+        }
         try:
-            async with session.post(url, json=payload) as resp:
+            async with session.post(url, json=payload, headers=headers) as resp:
                 await resp.json(content_type=None)
         except Exception as e:
             logger.warning("토큰 폐기 실패: %s", e)
@@ -384,6 +400,7 @@ class KiwoomAPIClient:
     def _headers(self, api_id: str, cont_yn: str = "N", next_key: str = "") -> dict:
         return {
             "Content-Type": "application/json;charset=UTF-8",
+            "User-Agent": self.USER_AGENT,
             "authorization": f"Bearer {self.token}",
             "api-id": api_id,
             "cont-yn": cont_yn,

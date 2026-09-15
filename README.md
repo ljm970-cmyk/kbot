@@ -30,7 +30,7 @@
 
 ## 설치
 
-파이썬 3.11 이상이 필요하다.
+파이썬 3.10 이상이 필요하다.
 
 ```bash
 git clone https://github.com/ljm970-cmyk/kbot.git ~/kbot

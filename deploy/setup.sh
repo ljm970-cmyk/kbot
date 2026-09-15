@@ -41,8 +41,9 @@ PY_VER=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 say "1. 파이썬 $PY_VER"
 "$PY" - <<'EOF'
 import sys
-if sys.version_info < (3, 11):
-    sys.exit("파이썬 3.11 이상이 필요합니다 (zoneinfo, timezone 처리)")
+if sys.version_info < (3, 10):
+    sys.exit("파이썬 3.10 이상이 필요합니다 "
+             "(zoneinfo 는 3.9+, 유니온 타입 문법 X | Y 는 3.10+)")
 EOF
 ok "버전 확인"
 

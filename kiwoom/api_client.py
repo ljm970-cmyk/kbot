@@ -10,7 +10,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -205,11 +205,57 @@ class KiwoomAPIClient:
                 return await resp.json()
     
     # ============================================================
-    # 시세
+    # 시세 / 차트
     # ============================================================
-    
-    async def get_current_price(self, ticker: str) -> float:
-        """현재가 조회"""
-        # ust16001 또는 별도 시세 API 활용
-        # TODO: 키움 시세 API ID 확인 필요
-        return 0.0
+
+    async def get_daily_closes(self, ticker: str, count: int = 5) -> List[float]:
+        """
+        미국주식 일차트 종가 조회 [1] usa06012
+
+        Args:
+            ticker: 종목코드 (TQQQ/SOXL 모두 NASDAQ)
+            count: 가져올 거래일 수
+
+        Returns:
+            최신순(내림차순) 종가 리스트. 실패 시 빈 리스트
+        """
+        self._ensure_token()
+
+        url = f"{self.base_url}/api/us/chart"
+        headers = {**self._get_headers(), "api-id": "usa06012"}
+
+        # 미국 휴장일을 감안해 필요 거래일보다 넉넉히 조회
+        strt_dt = (datetime.now() - timedelta(days=count * 2 + 10)).strftime('%Y%m%d')
+
+        payload = {
+            "stex_tp": "ND",           # NASDAQ
+            "stk_cd": ticker,
+            "strt_dt": strt_dt,
+            "upd_stkpc_tp": "1",       # 수정주가 적용 (분할/배당 반영)
+            "exrt_appl_tp": "0",       # 환율 미적용 (USD 원본)
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload,
+                                  timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                data = await resp.json()
+
+        if data.get('return_code') != 0:
+            logger.error(f"일차트 조회 실패({ticker}): {data.get('return_msg')}")
+            return []
+
+        closes = []
+        for row in (data.get('result_list') or [])[:count]:
+            raw = str(row.get('cur_prc', '')).strip().lstrip('+')
+            if raw:
+                closes.append(float(raw))
+
+        if len(closes) < count:
+            logger.warning(f"일차트 종가 부족({ticker}): {len(closes)}/{count}건")
+
+        return closes
+
+    async def get_last_close(self, ticker: str) -> float:
+        """직전 거래일 종가. 실패 시 0.0"""
+        closes = await self.get_daily_closes(ticker, count=1)
+        return closes[0] if closes else 0.0

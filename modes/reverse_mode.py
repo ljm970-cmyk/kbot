@@ -18,15 +18,10 @@ class ReverseMode(BaseTradingMode):
     
     [2] 핵심:
     - 처음매도: 무조건 MOC (전체÷10 or ÷20)
-    - 이후: 별지점 LOC 매도 + 쿼터매수
+    - 이후: 별지점(MA5) LOC 매도 + 쿼터매수
     - 종료: 종가가 평단 대비 -15%(TQQQ)/-20%(SOXL) 회복
     """
-    
-    REVERSE_PCT = {
-        'TQQQ': 0.15,
-        'SOXL': 0.20,
-    }
-    
+
     def generate_orders(self, state: dict) -> List[dict]:
         """다음 거래일 주문 생성"""
         orders = []
@@ -37,9 +32,11 @@ class ReverseMode(BaseTradingMode):
         # 처음매도 여부
         is_first = state.get('reverse_first_day', True)
         
-        # 별지점
+        # 별지점 = 직전 5거래일 종가 평균(MA5) [2]
+        # MA5를 못 구하면 LOC 주문을 만들지 않는다 (잘못된 가격 주문 방지)
+        ma5 = state.get('ma5', 0)
         star_calc = StarPointCalculator(self.ticker, self.division, 'reverse')
-        star = star_calc.calculate(avg_price, 0) if avg_price > 0 else None
+        star = star_calc.calculate(avg_price, 0, ma5=ma5) if ma5 > 0 else None
         
         if is_first:
             # 1. MOC 처음매도 [2]

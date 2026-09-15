@@ -113,15 +113,24 @@ class CommandsHandler:
             # 별지점
             if st['avg_price'] > 0:
                 star = StarPointCalculator(ticker, st['division'], st['mode'])
-                star_calc = star.calculate(st['avg_price'], st['T'])
-                
+                ma5 = st.get('ma5', 0)
+
                 if st['mode'] == 'normal':
-                    report += f"├ ⭐ 별지점: <code>${star_calc.star_point:.2f}</code> "
-                    f"(매수: <code>${star_calc.buy_price:.2f}</code>)\n"
+                    star_calc = star.calculate(st['avg_price'], st['T'])
+                    report += (
+                        f"├ ⭐ 별지점: <code>${star_calc.star_point:.2f}</code> "
+                        f"(매수: <code>${star_calc.buy_price:.2f}</code>)\n"
+                    )
+                elif ma5 > 0:
+                    star_calc = star.calculate(st['avg_price'], st['T'], ma5=ma5)
+                    star_pct = StarPointCalculator.STAR_PCT_REVERSE[ticker]
+                    recover = st['avg_price'] * (1 + star_pct / 100)
+                    report += (
+                        f"├ ⭐ 별지점(MA5): <code>${star_calc.star_point:.2f}</code> "
+                        f"(회복: <code>${recover:.2f}</code>)\n"
+                    )
                 else:
-                    recover = st['avg_price'] * (0.85 if ticker == 'TQQQ' else 0.80)
-                    report += f"├ ⭐ 별지점: <code>${star_calc.star_point:.2f}</code> "
-                    f"(회복: <code>${recover:.2f}</code>)\n"
+                    report += "├ ⭐ 별지점: <i>MA5 대기중</i>\n"
             
             report += f"└ ⏰ 다음주문: {self.tz.get_next_order_time().strftime('%m/%d %H:%M')}\n"
             report += f"   ({season_text})\n\n"
@@ -483,17 +492,17 @@ class CommandsHandler:
         user_id = await self._get_user_id(update)
         
         # 오입력 차단 (±60%)
-        current_price = await self._retry_api(
-            self.kiwoom.get_current_price, ticker, default=0
+        last_close = await self._retry_api(
+            self.kiwoom.get_last_close, ticker, default=0
         )
         input_price = self._safe_float(price)
-        
-        if current_price > 0 and input_price > 0:
-            lower, upper = current_price * 0.4, current_price * 1.6
+
+        if last_close > 0 and input_price > 0:
+            lower, upper = last_close * 0.4, last_close * 1.6
             if input_price < lower or input_price > upper:
                 await self._safe_reply(update.effective_message,
                     f"🚨 <b>오입력 차단</b>\n"
-                    f"현재가 ${current_price:.2f} 대비 ${input_price:.2f}는 ±60% 초과",
+                    f"직전 종가 ${last_close:.2f} 대비 ${input_price:.2f}는 ±60% 초과",
                     parse_mode='HTML')
                 return
         

@@ -15,24 +15,22 @@ class StarPointResult:
     star_point: float
     buy_price: float  # 매수: star - 0.01
     sell_price: float  # 매도: star (그대로)
-    recover_price: float = 0.0  # 리버스 회복 기준
 
 
 class StarPointCalculator:
     """
-    별지점 = 평단가 × (1 + 별%)
-    
-    [3] 일반모드 별%:
+    [3] 일반모드 별지점 = 평단가 × (1 + 별%)
         TQQQ 20분할: 15 - 1.5*T %
         TQQQ 40분할: 15 - 0.75*T %
         SOXL 20분할: 20 - 2*T %
         SOXL 40분할: 20 - T %
-    
-    [2] 리버스모드 별%:
-        TQQQ: -15% (평단 대비)
-        SOXL: -20% (평단 대비)
+
+    [2] 리버스모드 별지점 = 직전 5거래일 종가 평균(MA5) 그 자체
+
+    STAR_PCT_REVERSE(-15/-20)는 리버스 '종료판정' 전용 상수이며,
+    별지점 계산에는 쓰지 않는다. 두 값은 출처가 다르다.
     """
-    
+
     # 일반모드 별% 람다 [3]
     STAR_PCT_NORMAL = {
         ('TQQQ', 20): lambda T: (15 - 1.5 * T),
@@ -40,8 +38,8 @@ class StarPointCalculator:
         ('SOXL', 20): lambda T: (20 - 2 * T),
         ('SOXL', 40): lambda T: (20 - T),
     }
-    
-    # 리버스모드 별% [2]
+
+    # 리버스 종료판정 기준% (평단 대비) [2]
     STAR_PCT_REVERSE = {
         'TQQQ': -15,  # %
         'SOXL': -20,  # %
@@ -52,61 +50,52 @@ class StarPointCalculator:
         self.division = division
         self.mode = mode
     
-    def calculate(self, avg_price: float, T: float) -> StarPointResult:
+    def calculate(self, avg_price: float, T: float, ma5: float = 0.0) -> StarPointResult:
         """
         별지점 계산
-        
+
+        일반모드는 avg_price/T를, 리버스모드는 ma5만 사용한다.
         매수는 항상 0.01 차감 (일반/리버스 공통)
         """
         if self.mode == 'normal':
             return self._calc_normal(avg_price, T)
         else:
-            return self._calc_reverse(avg_price)
+            return self._calc_reverse(ma5)
     
     def _calc_normal(self, avg_price: float, T: float) -> StarPointResult:
         """일반모드 [3]"""
         # 별% 계산
         star_pct = self.STAR_PCT_NORMAL[(self.stock, self.division)](T)
         
-        # 별지점
-        star = avg_price * (1 + star_pct / 100)
-        
-        # 매수는 0.01 차감, 매도는 그대로
-        buy = round(star - 0.01, 2)
-        sell = round(star, 2)
-        
+        # 별지점 (0.01 차감 전에 먼저 반올림해야 매수가가 별지점과 같아지지 않음)
+        star = round(avg_price * (1 + star_pct / 100), 2)
+
         return StarPointResult(
-            star_point=round(star, 2),
-            buy_price=buy,
-            sell_price=sell
+            star_point=star,
+            buy_price=round(star - 0.01, 2),  # 매수: 별지점 아래
+            sell_price=star                    # 매도: 별지점 그대로
         )
     
-    def _calc_reverse(self, avg_price: float) -> StarPointResult:
+    def _calc_reverse(self, ma5: float) -> StarPointResult:
         """
         리버스모드 [2]
-        
-        별지점 = 평단 × (1 - 15% or -20%)
+
+        별지점 = 직전 5거래일 종가 평균(MA5)
         """
-        star_pct = self.STAR_PCT_REVERSE[self.stock]
-        
-        # 별지점 (음수)
-        star = avg_price * (1 + star_pct / 100)
-        
-        # 회복 기준: 별지점보다 높으면 일반모드 복귀
-        recover = round(star, 2)
-        
+        star = round(ma5, 2)
+
         return StarPointResult(
-            star_point=round(star, 2),
+            star_point=star,
             buy_price=round(star - 0.01, 2),  # 매수: 별지점 아래
-            sell_price=round(star, 2),         # 매도: 별지점 위에서
-            recover_price=recover
+            sell_price=star                   # 매도: 별지점 그대로
         )
-    
+
     def is_reverse_end(self, close_price: float, avg_price: float) -> bool:
         """
         리버스모드 종료 조건 [2]
-        
-        종가가 평단 대비 기준% 이상 회복
+
+        종가가 '평단' 대비 기준%(-15/-20)보다 크면 종료.
+        별지점(MA5)과는 무관한 별도 기준이다.
         """
         star_pct = self.STAR_PCT_REVERSE[self.stock]  # -15 or -20
         threshold = avg_price * (1 + star_pct / 100)

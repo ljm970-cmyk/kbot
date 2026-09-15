@@ -1,16 +1,27 @@
 """
 ================================================================
-WebSocket 실시간 체결 수신 (F5)
+미국주식 실시간 체결 수신 (F5)
 
-[1] 키움 REST API 문서:
-    - F5: 실시간 체결
-    - FE: 실시간 체결가
-    "ACCESS TOKEN 발급 계좌의 주문 접수/체결/정정/취소 실시간 수신"
-    "종목코드(item) 등록과 무관"
+    wss://api.kiwoom.com:10000/api/us/websocket      운영
+    wss://mockapi.kiwoom.com:10000/api/us/websocket  모의투자
 
-모의투자 관련 URL 완전 제거
+F5 는 종목 등록과 무관하게, 토큰을 발급한 계좌의 모든 매매 이벤트를
+보낸다. 값은 필드명이 아니라 **숫자 코드**로 오고, 0 패딩된 문자열이다.
+
+    {"data": [{"type": "F5", "item": "NVDA",
+               "values": {"9001": "NVDA", "901": "0000198.4200", ...}}],
+     "trnm": "REAL"}
+
+기존 구현은 slby_gubun / fil_q / fil_prc 같은 존재하지 않는 필드명을
+읽어서 모든 체결이 0으로 들어왔고, 태그 매칭에 반드시 필요한
+**주문가격(901)** 을 아예 받지 않았다.
+
+LOC 는 주문가격과 체결가가 다르다 (76.02 에 걸어도 종가 68.10 에 체결).
+주문가격이 없으면 어떤 주문이 체결됐는지 복원할 수 없다.
 ================================================================
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
@@ -19,277 +30,359 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Optional
+from zoneinfo import ZoneInfo
 
-import pytz
 import websockets
 
-logger = logging.getLogger("kbot.websocket")
+logger = logging.getLogger("kbot.ws")
+KST = ZoneInfo("Asia/Seoul")
 
+
+# ================================================================
+# F5 필드 코드
+# ================================================================
+
+class F5:
+    """미국주식 실시간 체결 필드 코드"""
+    COUNTRY = "1091"
+    EXCHANGE = "8046"
+    TICKER = "9001"
+    NAME = "302"
+    ORIG_ORD_NO = "904"
+    ORD_NO = "9203"
+    ORD_KIND = "905"        # 10:원주문 11:정정 12:취소
+    SIDE = "907"            # 01:매도 02:매수
+    TIME = "908"            # 주문/체결시간 HHMMSS
+    STATUS = "913"          # 텍스트: 접수 / 부분체결 / 체결완료 / 무효주문
+    ORD_QTY = "900"
+    ORD_PRICE = "901"       # 주문가격 — 태그 매칭 키
+    REMAIN_QTY = "902"
+    FILL_NO = "909"         # 체결번호
+    FILL_PRICE = "910"      # 체결가
+    FILL_QTY = "911"        # 체결량
+    HOLDINGS = "930"        # 보유수량 (증권사 기준)
+    AVG_PRICE = "931"       # 매입단가 (증권사 기준)
+    PL_AMOUNT = "8018"
+    CURRENCY = "8043"
+    ACCOUNT = "9201"
+    TRADE_KIND = "50073"    # 매매구분명: 지정가 / 시장가 / LOC ...
+    STOP_PRICE = "50810"
+    RESERVED = "50841"      # 예약구분
+
+
+#: 매매구분명 → TradeType 코드 (텍스트로만 오므로 역매핑이 필요하다)
+TRADE_KIND_TO_CODE = {
+    "지정가": "00", "시장가": "03",
+    "LOC": "30", "MOC": "33",
+    "STOP LIMIT": "34", "STOP": "35",
+    "VWAP지정가": "26", "TWAP지정가": "27",
+    "VWAP시장가": "36", "TWAP시장가": "37",
+}
+
+
+def _num(v) -> float:
+    """0 패딩 문자열 → float. ("0000198.4200" → 198.42)"""
+    if v is None:
+        return 0.0
+    s = str(v).strip().replace(",", "")
+    if not s:
+        return 0.0
+    neg = s.startswith("-")
+    s = s.lstrip("+-")
+    try:
+        f = float(s)
+    except ValueError:
+        return 0.0
+    return -f if neg else f
+
+
+def _int(v) -> int:
+    return int(_num(v))
+
+
+# ================================================================
+# 체결 레코드
+# ================================================================
 
 @dataclass
 class RealtimeFill:
-    """실시간 체결 데이터 구조"""
-    order_no: str
+    """F5 수신 체결 1건"""
+    ord_no: str
     fill_no: str
-    stock: str
-    fill_type: str  # 'buy' or 'sell'
+    ticker: str
+    side: str               # buy / sell
     fill_qty: int
     fill_price: float
-    fill_time: str  # HHMMSS
+    order_price: float      # 주문가격 — LOC 태그 매칭에 필수
+    trade_type: str         # TradeType 코드
+    status: str
+    fill_time: str          # HHMMSS
+    trade_date: str         # YYYYMMDD (KST 기준 미국 거래일)
     kst_timestamp: str
-    is_reverse_mode: bool = False
-    
-    def to_db_tuple(self):
-        return (
-            self.order_no, self.fill_no, self.stock,
-            self.fill_type, self.fill_qty, self.fill_price,
-            self.fill_time, self.kst_timestamp,
-            1 if self.is_reverse_mode else 0
-        )
+    broker_holdings: int = 0     # 증권사 기준 보유수량 — 대조용
+    broker_avg_price: float = 0.0
 
+    def to_row(self) -> tuple:
+        return (self.ord_no, self.fill_no, self.ticker, self.side,
+                self.fill_qty, self.fill_price, self.order_price,
+                self.trade_type, self.status, self.fill_time,
+                self.trade_date, self.kst_timestamp,
+                self.broker_holdings, self.broker_avg_price, 0)
+
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS realtime_fills (
+    ord_no            TEXT NOT NULL,
+    fill_no           TEXT NOT NULL,
+    ticker            TEXT NOT NULL,
+    side              TEXT NOT NULL,
+    fill_qty          INTEGER NOT NULL,
+    fill_price        REAL NOT NULL,
+    order_price       REAL NOT NULL DEFAULT 0,
+    trade_type        TEXT DEFAULT '',
+    status            TEXT DEFAULT '',
+    fill_time         TEXT DEFAULT '',
+    trade_date        TEXT NOT NULL,
+    kst_timestamp     TEXT NOT NULL,
+    broker_holdings   INTEGER DEFAULT 0,
+    broker_avg_price  REAL DEFAULT 0,
+    processed         INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (ord_no, fill_no)
+);
+CREATE INDEX IF NOT EXISTS idx_fills_day ON realtime_fills(trade_date, ticker);
+"""
+
+
+# ================================================================
+# 수신기
+# ================================================================
 
 class WebSocketFillReceiver:
-    """
-    키움 WebSocket 실시간 체결 수신
-    
-    [1] 운영만 사용:
-        wss://api.kiwoom.com:10000
-    """
-    
-    # 운영만 사용 (모의투자 제거)
-    WS_URL = "wss://api.kiwoom.com:10000/api/us/websocket"
-    
-    def __init__(self, access_token: str, db_path: str = "data/fills/realtime_fills.db"):
-        self.access_token = access_token
-        self.db_path = db_path
-        self.running = False
-        self.ws = None
-        self._callbacks: List[Callable[[RealtimeFill], None]] = []
-        
-        # DB 초기화
-        self._init_db()
-    
-    def _init_db(self):
-        """SQLite: 미처리 체결 임시 저장"""
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        
-        conn = sqlite3.connect(self.db_path)
-        try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS realtime_fills (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    order_no TEXT,
-                    fill_no TEXT UNIQUE,
-                    stock TEXT,
-                    fill_type TEXT,
-                    fill_qty INTEGER,
-                    fill_price REAL,
-                    fill_time TEXT,
-                    kst_timestamp TEXT,
-                    is_reverse_mode INTEGER DEFAULT 0,
-                    is_processed INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_unprocessed 
-                ON realtime_fills(stock, is_processed)
-            """)
-            conn.commit()
-        finally:
-            conn.close()
-    
-    def add_callback(self, callback: Callable[[RealtimeFill], None]):
-        """체결 수신 시 호출할 콜백 등록"""
-        self._callbacks.append(callback)
-    
-    # ============================================================
-    # 연결 관리
-    # ============================================================
-    
-    async def connect(self):
-        """WebSocket 연결 및 F5 등록"""
-        self.running = True
-        
-        headers = {
-            "Authorization": f"Bearer {self.access_token}"
-        }
-        
-        try:
-            async with websockets.connect(
-                self.WS_URL,
-                extra_headers=headers,
-                ping_interval=30,
-                ping_timeout=10
-            ) as ws:
-                self.ws = ws
-                logger.info(f"WebSocket 연결: {self.WS_URL}")
+    """F5 실시간 체결 수신기
 
-                # LOGIN 인증 (REG보다 먼저 필요)
-                login_msg = {
-                    "trnm": "LOGIN",
-                    "token": self.access_token
-                }
-                await ws.send(json.dumps(login_msg))
-                login_resp = json.loads(await ws.recv())
-                logger.info(f"LOGIN 응답: {login_resp}")
-                
-                if login_resp.get("return_code") != 0:
-                    logger.error(f"LOGIN 실패: {login_resp.get('return_msg')}")
-                    return
-                
-                # F5 실시간 체결 등록 [1]
-                reg_msg = {
-                    "trnm": "REG",
-                    "grp_no": "0001",
-                    "refresh": "0",
-                    "data": [
-                        {
-                            "item": [{"jmcode": "", "stex_tp": "ND"}],  # 전체 종목
-                            "type": ["F5"]  # 실시간 체결
-                        }
-                    ]
-                }
-                await ws.send(json.dumps(reg_msg))
-                logger.info("F5 실시간 체결 등록 완료")
-                
-                # 수신 루프
-                await self._receive_loop(ws)
-                
-        except Exception as e:
-            logger.error(f"WebSocket 연결 오류: {type(e).__name__}: {e!r}", exc_info=True)
-            # 재연결 지연
-            await asyncio.sleep(10)
-            if self.running:
-                asyncio.create_task(self.connect())
-    
-    async def _receive_loop(self, ws):
-        """메시지 수신 루프"""
+    토큰은 콜백으로 받는다. 생성 시점 토큰을 복사해 두면 갱신 후
+    옛 토큰으로 재연결을 시도하게 된다 (기존 구현의 문제).
+    """
+
+    PING_INTERVAL = 30
+    MAX_BACKOFF = 300
+
+    def __init__(
+        self,
+        access_token: str | Callable[[], str] = "",
+        db_path: str | Path = "data/fills/realtime_fills.db",
+        ws_url: str = "wss://api.kiwoom.com:10000",
+        group_no: str = "1",
+    ):
+        self._token_source = access_token
+        self.db_path = str(db_path)
+        self.url = f"{ws_url.rstrip('/')}/api/us/websocket"
+        self.group_no = group_no
+        self.running = False
+        self.connected = False
+        self._ws = None
+        self._callbacks: list[Callable[[RealtimeFill], None]] = []
+        self._last_message_at: Optional[datetime] = None
+
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.db_path) as c:
+            c.executescript(_SCHEMA)
+
+    @property
+    def token(self) -> str:
+        src = self._token_source
+        return src() if callable(src) else str(src)
+
+    def add_callback(self, cb: Callable[[RealtimeFill], None]) -> None:
+        self._callbacks.append(cb)
+
+    # ------------------------------------------------------------
+    # 연결
+    # ------------------------------------------------------------
+
+    async def connect(self) -> None:
+        """끊기면 지수 백오프로 재연결한다"""
+        self.running = True
+        backoff = 1
         while self.running:
             try:
-                msg = await asyncio.wait_for(ws.recv(), timeout=60.0)
-                await self._handle_message(json.loads(msg))
-            except asyncio.TimeoutError:
-                # ping 유지
-                try:
-                    await ws.send(json.dumps({"trnm": "PING"}))
-                except:
-                    break
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning(f"WebSocket 연결 종료: code={ws.close_code}, reason={ws.close_reason}")
-                break
+                async with websockets.connect(self.url, ping_interval=self.PING_INTERVAL) as ws:
+                    self._ws = ws
+                    await self._login(ws)
+                    await self._register(ws)
+                    self.connected = True
+                    backoff = 1
+                    logger.info("F5 실시간 체결 수신 시작")
+                    await self._receive_loop(ws)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                logger.error(f"수신 오류: {e}")
-    
-    async def _handle_message(self, msg: dict):
-        """수신 메시지 처리"""
-        trnm = msg.get("trnm", "")
-        
-        if trnm == "F5":  # 실시간 체결 데이터
-            fill = self._parse_fill(msg)
-            self._save_fill(fill)
-            
-            # 콜백 실행 (로깅만, T값 계산은 장마감 후)
+                if not self.running:
+                    break
+                logger.warning("WebSocket 끊김 (%s) — %d초 후 재연결", e, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, self.MAX_BACKOFF)
+            finally:
+                self.connected = False
+                self._ws = None
+
+    async def _login(self, ws) -> None:
+        await ws.send(json.dumps({"trnm": "LOGIN", "token": self.token}))
+        resp = json.loads(await ws.recv())
+        if str(resp.get("return_code", "0")) not in ("0", "None"):
+            raise RuntimeError(f"WebSocket 로그인 실패: {resp.get('return_msg')}")
+
+    async def _register(self, ws) -> None:
+        """F5 등록. 종목 등록과 무관하게 계좌 전체 이벤트가 온다."""
+        await ws.send(json.dumps({
+            "trnm": "REG",
+            "grp_no": self.group_no,
+            "refresh": "1",
+            "data": [{"item": [], "type": ["F5"]}],
+        }))
+
+    async def _receive_loop(self, ws) -> None:
+        async for raw in ws:
+            if not self.running:
+                break
+            try:
+                await self._handle(json.loads(raw))
+            except Exception:
+                logger.exception("메시지 처리 실패: %s", str(raw)[:300])
+
+    async def _handle(self, msg: dict) -> None:
+        self._last_message_at = datetime.now(KST)
+
+        if msg.get("trnm") == "PING":
+            if self._ws:
+                await self._ws.send(json.dumps(msg))
+            return
+        if msg.get("trnm") != "REAL":
+            return
+
+        for block in msg.get("data", []):
+            if block.get("type") != "F5":
+                continue
+            fill = self._parse(block.get("values", {}))
+            if fill is None:
+                continue
+            self._save(fill)
+            logger.info("체결 %s %s %d주 @%.2f (주문가 %.2f, %s)",
+                        fill.ticker, fill.side, fill.fill_qty,
+                        fill.fill_price, fill.order_price, fill.status)
             for cb in self._callbacks:
                 try:
-                    if asyncio.iscoroutinefunction(cb):
-                        await cb(fill)
-                    else:
-                        cb(fill)
-                except Exception as e:
-                    logger.error(f"콜백 오류: {e}")
-            
-            logger.info(
-                f"[실시간체결] {fill.stock} {fill.fill_type} "
-                f"{fill.fill_qty}주 @{fill.fill_price} "
-                f"(보류→장마감후계산)"
-            )
-        
-        elif trnm == "PONG":
-            pass  # 핑퐁 응답
-        
-        elif trnm == "REG":
-            logger.info(f"REG 응답: {msg}")
+                    cb(fill)
+                except Exception:
+                    logger.exception("체결 콜백 실패")
 
-        elif trnm.startswith("CLOSE"):
-            logger.warning(f"서버 종료 신호: {msg}")
-    
-    def _parse_fill(self, raw: dict) -> RealtimeFill:
-        """원시 메시지 → RealtimeFill 파싱"""
-        now = datetime.now(pytz.timezone('Asia/Seoul'))
-        
-        # [1] 키움 API 응답 필드 (실제 응답 확인 필요)
+    # ------------------------------------------------------------
+    # 파싱
+    # ------------------------------------------------------------
+
+    def _parse(self, v: dict) -> Optional[RealtimeFill]:
+        """F5 values → RealtimeFill.
+
+        F5 는 주문 접수 시점에도 온다 (913="접수", 911="0").
+        체결량이 0이면 체결이 아니므로 건너뛴다.
+        """
+        fill_qty = _int(v.get(F5.FILL_QTY))
+        if fill_qty <= 0:
+            return None
+
+        now = datetime.now(KST)
+        kind = str(v.get(F5.TRADE_KIND, "")).strip()
+
         return RealtimeFill(
-            order_no=raw.get("ord_no", ""),
-            fill_no=raw.get("fil_no", "") or raw.get("fill_no", ""),
-            stock=raw.get("stk_cd", ""),
-            fill_type="buy" if raw.get("slby_gubun") == "2" else "sell",
-            fill_qty=int(raw.get("fil_q", 0) or raw.get("fill_qty", 0)),
-            fill_price=float(raw.get("fil_prc", 0) or raw.get("fill_price", 0)),
-            fill_time=raw.get("fil_tm", ""),
-            kst_timestamp=now.isoformat(),
-            is_reverse_mode=False  # state_manager에서 조회 필요
+            ord_no=str(v.get(F5.ORD_NO, "")).lstrip("0") or "0",
+            fill_no=str(v.get(F5.FILL_NO, "")).lstrip("0") or "0",
+            ticker=str(v.get(F5.TICKER, "")).upper(),
+            side="sell" if str(v.get(F5.SIDE, "")).zfill(2) == "01" else "buy",
+            fill_qty=fill_qty,
+            fill_price=_num(v.get(F5.FILL_PRICE)),
+            order_price=_num(v.get(F5.ORD_PRICE)),
+            trade_type=TRADE_KIND_TO_CODE.get(kind, ""),
+            status=str(v.get(F5.STATUS, "")),
+            fill_time=str(v.get(F5.TIME, "")),
+            trade_date=self._session_date(now),
+            kst_timestamp=now.isoformat(timespec="seconds"),
+            broker_holdings=_int(v.get(F5.HOLDINGS)),
+            broker_avg_price=_num(v.get(F5.AVG_PRICE)),
         )
-    
-    def _save_fill(self, fill: RealtimeFill):
-        """DB에 미처리 상태로 저장"""
-        conn = sqlite3.connect(self.db_path)
-        try:
-            conn.execute("""
-                INSERT OR IGNORE INTO realtime_fills 
-                (order_no, fill_no, stock, fill_type, fill_qty, 
-                 fill_price, fill_time, kst_timestamp, is_reverse_mode)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, fill.to_db_tuple())
-            conn.commit()
-        finally:
-            conn.close()
-    
-    # ============================================================
-    # 조회/처리 (EOD 계산기에서 호출)
-    # ============================================================
-    
-    def get_unprocessed_fills(self, stock: str = None) -> List[RealtimeFill]:
-        """장마감 후 처리되지 않은 체결 내역 조회"""
-        conn = sqlite3.connect(self.db_path)
-        try:
-            if stock:
-                rows = conn.execute("""
-                    SELECT * FROM realtime_fills 
-                    WHERE stock = ? AND is_processed = 0
-                    ORDER BY kst_timestamp
-                """, (stock,)).fetchall()
-            else:
-                rows = conn.execute("""
-                    SELECT * FROM realtime_fills 
-                    WHERE is_processed = 0
-                    ORDER BY stock, kst_timestamp
-                """,).fetchall()
-            
-            return [RealtimeFill(
-                order_no=r[1], fill_no=r[2], stock=r[3],
-                fill_type=r[4], fill_qty=r[5], fill_price=r[6],
-                fill_time=r[7], kst_timestamp=r[8], is_reverse_mode=bool(r[9])
-            ) for r in rows]
-        finally:
-            conn.close()
-    
-    def mark_processed(self, fill_no: str):
-        """처리 완료 표시"""
-        conn = sqlite3.connect(self.db_path)
-        try:
-            conn.execute("""
-                UPDATE realtime_fills SET is_processed = 1 
-                WHERE fill_no = ?
-            """, (fill_no,))
-            conn.commit()
-        finally:
-            conn.close()
-    
-    def stop(self):
-        """수신 중지"""
+
+    @staticmethod
+    def _session_date(now: datetime) -> str:
+        """체결이 속한 미국 거래일(YYYYMMDD).
+
+        한국 새벽에 들어오는 체결은 전날 저녁에 시작된 미국 세션의 것이다.
+        """
+        from core.market_calendar import ET
+        return now.astimezone(ET).strftime("%Y%m%d")
+
+    # ------------------------------------------------------------
+    # 저장 / 조회
+    # ------------------------------------------------------------
+
+    def _save(self, fill: RealtimeFill) -> None:
+        with sqlite3.connect(self.db_path, timeout=10) as c:
+            c.execute(
+                "INSERT OR IGNORE INTO realtime_fills VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                fill.to_row())
+
+    async def fills_for(self, trade_date: str, ticker: str) -> list:
+        """EOD 계산기에 넘길 FillEvent 목록.
+
+        SchedulerEngine(fill_source=...) 에 그대로 연결된다.
+        """
+        from eod.calculator import FillEvent
+
+        with sqlite3.connect(self.db_path, timeout=10) as c:
+            c.row_factory = sqlite3.Row
+            rows = c.execute(
+                "SELECT * FROM realtime_fills WHERE trade_date=? AND ticker=?",
+                (trade_date, ticker.upper())).fetchall()
+
+        return [
+            FillEvent(
+                ticker=r["ticker"], side=r["side"],
+                qty=r["fill_qty"], price=r["fill_price"],
+                order_price=r["order_price"] or None,
+                ord_no=r["ord_no"], fill_no=r["fill_no"],
+                trade_type=r["trade_type"],
+                time=r["fill_time"], source="websocket",
+            )
+            for r in rows
+        ]
+
+    def broker_position(self, trade_date: str, ticker: str) -> Optional[tuple[int, float]]:
+        """증권사가 알려준 마지막 보유수량·매입단가.
+
+        전략 장부와 대조해 어긋남을 조기에 잡는 데 쓴다.
+        """
+        with sqlite3.connect(self.db_path, timeout=10) as c:
+            r = c.execute(
+                "SELECT broker_holdings, broker_avg_price FROM realtime_fills "
+                "WHERE trade_date=? AND ticker=? ORDER BY kst_timestamp DESC LIMIT 1",
+                (trade_date, ticker.upper())).fetchone()
+        return (r[0], r[1]) if r else None
+
+    def mark_processed(self, trade_date: str, ticker: str = "") -> int:
+        sql = "UPDATE realtime_fills SET processed=1 WHERE trade_date=?"
+        args = [trade_date]
+        if ticker:
+            sql += " AND ticker=?"
+            args.append(ticker.upper())
+        with sqlite3.connect(self.db_path, timeout=10) as c:
+            return c.execute(sql, args).rowcount
+
+    def health(self) -> str:
+        if not self.connected:
+            return "WebSocket 끊김"
+        if self._last_message_at:
+            gap = (datetime.now(KST) - self._last_message_at).total_seconds()
+            return f"WebSocket 연결됨 (마지막 수신 {gap:.0f}초 전)"
+        return "WebSocket 연결됨 (수신 없음)"
+
+    def stop(self) -> None:
         self.running = False
-        if self.ws:
-            asyncio.create_task(self.ws.close())
-        logger.info("WebSocket 수신 종료")

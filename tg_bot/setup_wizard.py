@@ -319,6 +319,7 @@ class SetupWizard:
         user_id = context.user_data['user_id']
         configs = context.user_data['tickers_config']
         
+        applied = []
         for c in configs:
             full_config = {
                 "user_id": user_id,
@@ -339,11 +340,24 @@ class SetupWizard:
                 },
             }
             self.state.save_ticker_config(user_id, c['ticker'], full_config)
-            
-            # 초기 상태 생성
-            self.state.get_state(user_id, c['ticker'])  # 자동 생성
+
+            # 설정을 실행 상태에 반영한다.
+            # 저장만 하고 get_state() 를 부르면, 기존 상태 파일이 있을 때
+            # 분할수·원금 변경이 조용히 무시된다.
+            res = self.state.apply_config(c['ticker'])
+            applied.append((c['ticker'], res))
         
-        await query.edit_message_text("✅ 설정 완료! 관제탑을 불러옵니다...")
+        lines = ["✅ 설정 완료!"]
+        for ticker, res in applied:
+            for c in res.get('changed', []):
+                lines.append(f"  [{ticker}] {c}")
+            for b in res.get('blocked', []):
+                lines.append(f"  ⚠️ [{ticker}] {b}")
+            if res.get('error'):
+                lines.append(f"  ⚠️ [{ticker}] {res['error']}")
+        lines.append("")
+        lines.append("관제탑을 불러옵니다...")
+        await query.edit_message_text("\n".join(lines))
         
         # 관제탑으로 이동 (bot.py에서 처리)
         context.user_data['setup_complete'] = True

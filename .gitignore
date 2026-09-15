@@ -1,39 +1,25 @@
-# ============================================================
-# KBOT .gitignore
-# ============================================================
-
-# Environment files (actual secrets)
+# 비밀정보 — 절대 커밋 금지
 .env
-.env.production
-.env.local
+*.pem
+*.key
 
-# Python cache
+# 런타임 데이터
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# 파이썬
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-
-# Virtual environment
 venv/
-env/
-ENV/
+.venv/
+*.egg-info/
+.pytest_cache/
 
-# IDE
+# 에디터
 .vscode/
 .idea/
-*.swp
-*.swo
-
-# Data files (runtime generated)
-data/**/*.json
-data/**/*.db
-!data/.gitkeep
-
-# Logs
-*.log
-logs/
-
-# OS
 .DS_Store
-Thumbs.db

@@ -1,90 +1,88 @@
 """
 ================================================================
-써머타임/비써머타임 자동 구분
+USMarketTimezone — 구버전 호환 래퍼
 
-기존 [4]의 _get_dst_info() 메서드를 독립 모듈로 분리
+시각 계산의 단일 출처는 core/market_calendar.py 다.
+이 모듈은 tg_bot 이 쓰던 인터페이스를 유지하되, 내부적으로는
+market_calendar 에 위임한다.
+
+기존 구현의 문제
+  - pytz 의 'US/Eastern' 을 쓰면서도 휴장일 개념이 없어
+    휴일·주말에도 다음 주문 시각을 돌려줬다
+  - 서머타임 경계를 직접 계산해 market_calendar 와 답이 갈릴 수 있었다
+
+신규 코드에서는 market_calendar 를 직접 쓴다.
 ================================================================
 """
 
-from datetime import datetime, timedelta
+from __future__ import annotations
 
-import pytz
+from datetime import datetime
+from typing import Optional
+
+from core.market_calendar import (
+    ET,
+    KST,
+    DaySchedule,
+    is_dst,
+    is_trading_day,
+    market_close_kst,
+    premarket_open_kst,
+    upcoming_session,
+)
 
 
 class USMarketTimezone:
-    """
-    미국 증시 시간대 (동부 시간 기준)
-    
-    [2][3] 영웅문 Global 기준:
-    - 써머타임: KST 17:30 주문 실행
-    - 비써머타임: KST 18:30 주문 실행
-    """
-    
-    KST = pytz.timezone('Asia/Seoul')
-    EASTERN = pytz.timezone('US/Eastern')
-    
-    # 주문 실행 시간 (영웅문 Global 기준) [3]
-    ORDER_SCHEDULE = {
-        'summer': (17, 30),   # 써머타임: KST 17:30
-        'winter': (18, 30),   # 비써머타임: KST 18:30
-    }
-    
-    # EOD 계산 시간 (써머타임/비써머타임 공용) [2]
-    EOD_HOUR = 6
-    EOD_MINUTE = 0
-    
+    """미국 증시 시각 유틸 (구버전 호환)"""
+
+    KST = KST
+    EASTERN = ET
+
     @classmethod
-    def is_summer_time(cls, kst_datetime: datetime = None) -> bool:
-        """써머타임 여부"""
-        if kst_datetime is None:
-            kst_datetime = datetime.now(cls.KST)
-        
-        eastern_dt = kst_datetime.astimezone(cls.EASTERN)
-        return eastern_dt.dst() != timedelta(0)
-    
+    def is_summer_time(cls, kst_datetime: Optional[datetime] = None) -> bool:
+        """미국 서머타임 여부"""
+        return is_dst(kst_datetime)
+
     @classmethod
     def get_dst_info(cls) -> tuple:
+        """(서머타임 여부, 설명 문자열)
+
+        방법론 6번: 지정가매도는 프리장 시작인
+        저녁 5시(서머타임) 또는 6시(비서머타임)에 건다.
         """
-        기존 [4]의 _get_dst_info()와 호환
-        
-        Returns:
-            (target_hour, season_text)
-            - summer: (17, "🌞 서머타임 (17:30)")
-            - winter: (18, "❄️ 겨울 (18:30)")
-        """
-        is_summer = cls.is_summer_time()
-        if is_summer:
-            return 17, "🌞 서머타임 (17:30)"
-        return 18, "❄️ 겨울 (18:30)"
-    
+        summer = is_dst()
+        label = "서머타임 (프리장 17:00 KST)" if summer else "비서머타임 (프리장 18:00 KST)"
+        return summer, label
+
     @classmethod
     def get_next_order_time(cls) -> datetime:
-        """다음 주문 실행 시각"""
-        now = datetime.now(cls.KST)
-        is_summer = cls.is_summer_time(now)
-        mode = 'summer' if is_summer else 'winter'
-        hour, minute = cls.ORDER_SCHEDULE[mode]
-        
-        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        
-        # 이미 지났으면 내일
-        if target <= now:
-            target += timedelta(days=1)
-            # 내일 DST 바뀔 수 있으므로 재확인
-            is_summer = cls.is_summer_time(target)
-            mode = 'summer' if is_summer else 'winter'
-            hour, minute = cls.ORDER_SCHEDULE[mode]
-            target = target.replace(hour=hour, minute=minute)
-        
-        return target
-    
+        """다음 주문 접수 시각 (KST).
+
+        주말·휴장일을 건너뛴 실제 거래일 기준이다.
+        """
+        return premarket_open_kst(upcoming_session())
+
     @classmethod
     def get_next_eod_time(cls) -> datetime:
-        """다음 EOD 계산 시각 (06:00 공용)"""
-        now = datetime.now(cls.KST)
-        target = now.replace(hour=cls.EOD_HOUR, minute=cls.EOD_MINUTE, second=0, microsecond=0)
-        
-        if target <= now:
-            target += timedelta(days=1)
-        
-        return target
+        """다음 EOD 정산 시각 (KST). 조기폐장일은 3시간 앞당겨진다."""
+        return DaySchedule.build(upcoming_session()).eod
+
+    @classmethod
+    def get_next_close_time(cls) -> datetime:
+        """다음 장 마감 시각 (KST)"""
+        return market_close_kst(upcoming_session())
+
+    @classmethod
+    def is_trading_day(cls, d=None) -> bool:
+        d = d or upcoming_session()
+        return is_trading_day(d)
+
+    @classmethod
+    def next_session(cls):
+        """다음 거래일 (date)"""
+        return upcoming_session()
+
+    @classmethod
+    def summary(cls) -> str:
+        """텔레그램 표시용"""
+        return DaySchedule.build(upcoming_session()).describe()

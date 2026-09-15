@@ -7,7 +7,7 @@ def validate_date(date_str: str) -> bool:
     """YYYYMMDD 검증"""
     try:
         from datetime import datetime
-        datetime.strptime(date_str, "%Y%m%m%d")
+        datetime.strptime(date_str, "%Y%m%d")
         return True
     except ValueError:
         return False

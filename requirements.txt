@@ -1,26 +1,30 @@
 # ============================================================
-# KBOT Requirements
+# kbot 의존성
+#
+#   pip install -r requirements.txt
+#
+# 파이썬 3.11 이상이 필요하다 (zoneinfo 표준 라이브러리).
 # ============================================================
 
-# Core
+# 텔레그램 봇
 python-telegram-bot==20.7
+
+# 환경설정
 python-dotenv==1.0.0
 
-# Scheduler
+# 스케줄러
 APScheduler==3.10.4
 
-# WebSocket
-websockets==12.0
+# 키움 REST API (aiohttp) / 실시간 체결 F5 (websockets)
 aiohttp==3.9.1
+websockets==12.0
 
-# Timezone
-pytz==2023.3
-
-# HTTP
-requests==2.31.0
-
-# Google Cloud (backup only)
-google-cloud-storage==2.10.0
-
-# Data
-# sqlite3 (built-in)
+# ------------------------------------------------------------
+# 제거된 것
+#
+#   requests            api_client 를 aiohttp 로 통일하면서 불필요
+#   pytz                표준 zoneinfo 사용 (파이썬 3.9+)
+#   google-cloud-storage 사용처 없음
+#
+# sqlite3 는 표준 라이브러리다.
+# ------------------------------------------------------------

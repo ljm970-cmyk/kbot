@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import logging
 import html
 from datetime import datetime, timedelta
 
@@ -18,6 +19,9 @@ from telegram.ext import ContextTypes
 
 from core.star_point import StarPointCalculator
 from core.timezone_handler import USMarketTimezone
+
+
+logger = logging.getLogger("kbot.telegram")
 
 
 class CommandsHandler:
@@ -51,15 +55,38 @@ class CommandsHandler:
         except Exception:
             try:
                 return await message.reply_text(text, **kwargs)
-            except:
+            except Exception:
+                # bare except 는 KeyboardInterrupt·SystemExit 까지 삼켜
+                # 종료 신호를 막는다.
                 return None
     
-    async def _retry_api(self, coro_func, *args, default=None, retries=3):
+    async def _retry_api(self, func, *args, default=None, retries=3, **kwargs):
+        """동기·비동기 함수를 모두 받아 재시도한다.
+
+        기존 구현은 무조건 await 했는데, state_manager 의 메서드는 동기라
+        TypeError 가 나고 3회 재시도 후 조용히 default 를 돌려줬다.
+        그래서 /status 가 모든 종목을 '상태 없음' 으로 표시했다.
+
+        프로그래밍 오류(TypeError/AttributeError 등)는 재시도해도 같은
+        결과이므로 즉시 로그를 남기고 중단한다. 재시도는 네트워크·일시
+        오류에만 의미가 있다.
+        """
+        import inspect
+
         for attempt in range(retries):
             try:
-                return await coro_func(*args)
+                result = func(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
+                return result
+            except (TypeError, AttributeError, KeyError, ValueError) as e:
+                logger.error("API 호출 오류 (재시도 안 함) %s: %s",
+                             getattr(func, "__name__", func), e)
+                return default
             except Exception as e:
                 if attempt == retries - 1:
+                    logger.warning("API 호출 %d회 실패 %s: %s",
+                                   retries, getattr(func, "__name__", func), e)
                     return default
                 await asyncio.sleep(2 ** attempt)
     
@@ -111,26 +138,36 @@ class CommandsHandler:
             )
             
             # 별지점
+            #
+            # 원본은 f-string 두 줄을 이어 썼는데, 둘째 줄은 report 에
+            # 더해지지 않고 버려지는 식(no-op)이었다. 매수가·회복가가
+            # 화면에 아예 나오지 않았다.
+            #
+            # 그리고 리버스 별지점은 직전 5거래일 종가 평균이라 평단·T로는
+            # 계산할 수 없다. 모드를 가리지 않고 calculate(avg, T)를 부르면
+            # 리버스 종목이 있을 때 /status 전체가 실패한다.
             if st['avg_price'] > 0:
-                star = StarPointCalculator(ticker, st['division'], st['mode'])
-                ma5 = st.get('ma5', 0)
-
                 if st['mode'] == 'normal':
-                    star_calc = star.calculate(st['avg_price'], st['T'])
+                    star = StarPointCalculator(ticker, st['division'], 'normal')
+                    sc = star.calculate(st['avg_price'], st['T'])
                     report += (
-                        f"├ ⭐ 별지점: <code>${star_calc.star_point:.2f}</code> "
-                        f"(매수: <code>${star_calc.buy_price:.2f}</code>)\n"
-                    )
-                elif ma5 > 0:
-                    star_calc = star.calculate(st['avg_price'], st['T'], ma5=ma5)
-                    star_pct = StarPointCalculator.STAR_PCT_REVERSE[ticker]
-                    recover = st['avg_price'] * (1 + star_pct / 100)
-                    report += (
-                        f"├ ⭐ 별지점(MA5): <code>${star_calc.star_point:.2f}</code> "
-                        f"(회복: <code>${recover:.2f}</code>)\n"
+                        f"├ ⭐ 별지점: <code>${sc.star_point:.2f}</code> "
+                        f"(매수: <code>${sc.buy_price:.2f}</code>)\n"
                     )
                 else:
-                    report += "├ ⭐ 별지점: <i>MA5 대기중</i>\n"
+                    star_pct = StarPointCalculator.STAR_PCT_REVERSE[ticker]
+                    recover = st['avg_price'] * (1 + star_pct / 100)
+                    ma5 = st.get('last_star_point', 0) or 0
+                    if ma5 > 0:
+                        report += (
+                            f"├ ⭐ 별지점(MA5): <code>${ma5:.2f}</code> "
+                            f"(회복: <code>${recover:.2f}</code>)\n"
+                        )
+                    else:
+                        report += (
+                            f"├ ⭐ 별지점: <i>MA5 대기중</i> "
+                            f"(회복: <code>${recover:.2f}</code>)\n"
+                        )
             
             report += f"└ ⏰ 다음주문: {self.tz.get_next_order_time().strftime('%m/%d %H:%M')}\n"
             report += f"   ({season_text})\n\n"
@@ -380,16 +417,28 @@ class CommandsHandler:
         if real_key == 'fee_rate':
             cfg['fee_display'] = converted * 100 if converted < 0.01 else converted
         
-        # 원금 변경 시 cash 재조정 (T=0일 때만)
-        if real_key == 'principal' and cfg.get('T', 0) == 0:
-            cfg['cash'] = converted
-        
+        # 구버전은 여기서 cfg.get('T', 0) 으로 진행 여부를 판단했는데,
+        # T 는 설정이 아니라 상태 파일에 있어 항상 0 으로 읽혔다. 게다가
+        # cfg['cash'] 를 써도 아무도 읽지 않아 변경이 반영되지 않았다.
+        # 저장 후 apply_config 가 실제 상태에 반영하고 제약을 판단한다.
         self.state.save_ticker_config(user_id, ticker, cfg)
-        
-        await self._safe_reply(update.effective_message,
-            f"✅ <b>{html.escape(ticker)}</b> 설정 변경:\n"
-            f"<code>{display_name}</code>: {old} → <b>{converted}</b>",
-            parse_mode='HTML')
+        res = self.state.apply_config(ticker)
+
+        lines = [f"✅ <b>{html.escape(ticker)}</b> 설정 변경:",
+                 f"<code>{display_name}</code>: {old} → <b>{converted}</b>"]
+        if res.get('changed'):
+            lines.append("")
+            lines.append("<b>실행 상태 반영</b>")
+            lines += [f"├ {html.escape(c)}" for c in res['changed']]
+        if res.get('blocked'):
+            lines.append("")
+            lines.append("<b>⚠️ 반영되지 않음</b>")
+            lines += [f"├ {html.escape(b)}" for b in res['blocked']]
+        if res.get('error'):
+            lines.append(f"⚠️ {html.escape(res['error'])}")
+
+        await self._safe_reply(update.effective_message, "\n".join(lines),
+                               parse_mode='HTML')
     
     def _parse_fee(self, value: str) -> float:
         """수수료 파서: 0.07 → 0.0007"""
@@ -492,17 +541,17 @@ class CommandsHandler:
         user_id = await self._get_user_id(update)
         
         # 오입력 차단 (±60%)
-        last_close = await self._retry_api(
-            self.kiwoom.get_last_close, ticker, default=0
+        current_price = await self._retry_api(
+            self.kiwoom.get_current_price, ticker, default=0
         )
         input_price = self._safe_float(price)
-
-        if last_close > 0 and input_price > 0:
-            lower, upper = last_close * 0.4, last_close * 1.6
+        
+        if current_price > 0 and input_price > 0:
+            lower, upper = current_price * 0.4, current_price * 1.6
             if input_price < lower or input_price > upper:
                 await self._safe_reply(update.effective_message,
                     f"🚨 <b>오입력 차단</b>\n"
-                    f"직전 종가 ${last_close:.2f} 대비 ${input_price:.2f}는 ±60% 초과",
+                    f"현재가 ${current_price:.2f} 대비 ${input_price:.2f}는 ±60% 초과",
                     parse_mode='HTML')
                 return
         
@@ -513,31 +562,43 @@ class CommandsHandler:
             'side': side,
             'type': 'MANUAL_FIX'
         })
-        
-        if result:
+
+        # 구버전은 반환값을 확인하지 않아, 실패해도 사용자에게 아무 응답이
+        # 가지 않았다. 게다가 기록만 하고 장부에 반영되지 않았다.
+        if not result or not result.get('ok'):
+            reason = (result or {}).get('error', '알 수 없는 오류')
             await self._safe_reply(update.effective_message,
-                f"✅ <b>[{html.escape(ticker)}] 수동 보정 완료</b>\n"
-                f"├ 날짜: <code>{date_str}</code>\n"
-                f"├ 구분: <code>{side}</code>\n"
-                f"├ 수량: <code>{qty}</code>주\n"
-                f"├ 가격: <code>${input_price:.2f}</code>\n\n"
-                f"<i>다음 EOD 계산 시 반영</i>",
+                f"⚠️ <b>[{html.escape(ticker)}] 보정 실패</b>\n{html.escape(str(reason))}",
                 parse_mode='HTML')
+            return
+
+        b, a = result['before'], result['after']
+        await self._safe_reply(update.effective_message,
+            f"✅ <b>[{html.escape(ticker)}] 수동 보정 완료</b>\n"
+            f"├ 날짜: <code>{date_str}</code>\n"
+            f"├ 구분: <code>{side}</code>\n"
+            f"├ 수량: <code>{qty}</code>주\n"
+            f"├ 가격: <code>${input_price:.2f}</code>\n"
+            f"├ 수수료: <code>${result.get('fee', 0):.2f}</code>\n\n"
+            f"<b>장부 변화</b>\n"
+            f"├ 보유: <code>{b['holdings']} → {a['holdings']}</code>주\n"
+            f"├ 평단: <code>${b['avg_price']:.4f} → ${a['avg_price']:.4f}</code>\n"
+            f"└ 잔금: <code>${b['cash']:,.2f} → ${a['cash']:,.2f}</code>\n\n"
+            f"<i>T값은 바뀌지 않습니다. 필요하면 /status 로 확인 후 조정하세요.</i>",
+            parse_mode='HTML')
     
     async def cmd_force_calc(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """⚡ 강제 EOD 계산"""
-        status_msg = await self._safe_reply(update.effective_message,
-            "⏳ <b>[강제 EOD 계산]</b>\n미처리 체결 내역 처리 중...",
+        """구버전 진입점.
+
+        실제 EOD 는 스케줄러가 돌린다(bot.py 의 _cmd_force_eod).
+        여기로 들어오면 연결이 끊긴 것이므로 그 사실을 알린다.
+        예전처럼 '계산 완료' 라고 응답해서 정산이 끝난 것처럼 보이면 안 된다.
+        """
+        await self._safe_reply(update.effective_message,
+            "⚠️ <b>[EOD 계산]</b>\n"
+            "스케줄러 연결이 필요합니다. <code>/run eod</code> 를 사용하세요.",
             parse_mode='HTML')
-        
-        # TODO: eod.calculator 호출 (user_id 전달)
-        user_id = await self._get_user_id(update)
-        
-        await self._safe_edit(status_msg,
-            "✅ <b>[EOD 계산 완료]</b>\n"
-            "<i>결과: TODO - eod.calculator 연동 필요</i>",
-            parse_mode='HTML')
-    
+
     # ============================================================
     # 헬퍼
     # ============================================================

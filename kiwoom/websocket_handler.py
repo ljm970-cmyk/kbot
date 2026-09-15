@@ -186,7 +186,36 @@ class WebSocketFillReceiver:
         self._last_message_at: Optional[datetime] = None
 
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _init_db(self) -> None:
+        """스키마 생성 및 구버전 마이그레이션.
+
+        CREATE TABLE IF NOT EXISTS 는 기존 테이블이 있으면 건너뛴다.
+        그래서 구버전 스키마 위에 배포하면 테이블은 옛 컬럼 그대로인데
+        인덱스만 새 컬럼을 요구해 터진다.
+
+        구버전 데이터는 필드명을 잘못 읽어 수량·가격이 0으로 저장돼
+        있으므로 보존할 가치가 없다. 다만 지우지는 않고 이름을 바꿔
+        남겨둔다 (사후 확인용).
+        """
+        required = {"trade_date", "order_price", "fill_no", "ticker"}
         with sqlite3.connect(self.db_path) as c:
+            exists = c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='realtime_fills'"
+            ).fetchone()
+            if exists:
+                cols = {r[1] for r in c.execute("PRAGMA table_info(realtime_fills)")}
+                if not required.issubset(cols):
+                    from datetime import datetime as _dt
+                    legacy = f"realtime_fills_legacy_{_dt.now():%Y%m%d%H%M%S}"
+                    logger.warning(
+                        "구버전 체결 테이블을 발견했습니다. %s 로 이름을 바꾸고 "
+                        "새 스키마를 만듭니다 (누락 컬럼: %s)",
+                        legacy, ", ".join(sorted(required - cols)))
+                    c.execute(f"ALTER TABLE realtime_fills RENAME TO {legacy}")
+                    for idx in ("idx_fills_day",):
+                        c.execute(f"DROP INDEX IF EXISTS {idx}")
             c.executescript(_SCHEMA)
 
     @property

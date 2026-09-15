@@ -84,6 +84,18 @@ class KiwoomOrderUncertainError(Exception):
         )
 
 
+#: "조회 결과 없음" 을 뜻하는 메시지 조각.
+#:
+#: 키움은 데이터가 없을 때도 return_code != 0 으로 응답한다.
+#: 에러로 처리하면 예약주문이 하나도 없는 날 검증 단계가 통째로 실패한다.
+EMPTY_RESULT_HINTS = ("자료가 존재하지 않습니다", "조회할 자료가 없습니다",
+                      "데이터가 없습니다")
+
+
+def is_empty_result(message: str) -> bool:
+    return any(h in (message or "") for h in EMPTY_RESULT_HINTS)
+
+
 class KiwoomAPIError(Exception):
     """키움 API 가 return_code != 0 을 반환했을 때"""
 
@@ -492,7 +504,13 @@ class KiwoomAPIClient:
         cont_yn, next_key = "N", ""
 
         for _ in range(self.MAX_PAGES):
-            data, headers = await self.request(api_id, path, body, cont_yn, next_key)
+            try:
+                data, headers = await self.request(api_id, path, body, cont_yn, next_key)
+            except KiwoomAPIError as e:
+                if is_empty_result(e.message):
+                    logger.debug("[%s] 조회 결과 없음", api_id)
+                    break
+                raise
             rows.extend(_pick_list(data, *list_keys))
 
             if headers.get("cont-yn") != "Y":
@@ -711,7 +729,10 @@ class KiwoomAPIClient:
             "slby_tp": SideFilter.ALL,
             "stex_tp": exchange,
             "stk_cd": ticker,
-            "base_dt_tp": "",
+            # 문서상 Required=N 이고 예제도 빈 문자열이지만, 실제로는
+            # 비워 보내면 "기준일구분값을 확인하십시요" 로 거부된다.
+            # 0:주문전송일 — 그날 실제로 나갈 주문을 보는 것이 목적이다.
+            "base_dt_tp": "0",
         }
         return await self.request_all("ust21205", self.PATH_ORDER, body)
 

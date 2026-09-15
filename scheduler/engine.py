@@ -80,7 +80,9 @@ class SchedulerEngine:
     """매매 스케줄러"""
 
     PLAN_HOUR = 12          # 매일 이 시각(KST)에 그날 일정을 계산한다
-    TOKEN_REFRESH_MIN = 60
+    #: 토큰 갱신 주기(시간). minute 필드는 0~59 라 "*/60" 은 쓸 수 없다.
+    TOKEN_REFRESH_HOURS = 1
+    #: 헬스체크 주기(분)
     HEALTH_CHECK_MIN = 30
 
     def __init__(
@@ -118,7 +120,8 @@ class SchedulerEngine:
             id="plan_day", replace_existing=True, misfire_grace_time=3600,
         )
         self.scheduler.add_job(
-            self._refresh_token, CronTrigger(minute=f"*/{self.TOKEN_REFRESH_MIN}", timezone=KST),
+            self._refresh_token,
+            CronTrigger(hour=f"*/{self.TOKEN_REFRESH_HOURS}", minute=0, timezone=KST),
             id="refresh_token", replace_existing=True,
         )
         self.scheduler.add_job(

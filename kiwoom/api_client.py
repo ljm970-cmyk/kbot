@@ -834,6 +834,8 @@ class KiwoomAPIClient:
     async def get_balance(self, ticker: str = "", exchange: str = "") -> list[dict]:
         """원장잔고확인 (ust21070) → 보유종목 리스트"""
         body = {"stex_tp": exchange, "stk_cd": ticker}
+        # 보유 종목이 없으면 "자료가 존재하지 않습니다" 로 온다.
+        # request_all 이 빈 리스트로 돌려주므로 그대로 쓴다.
         rows = await self.request_all("ust21070", self.PATH_ACCOUNT, body)
         return [
             {

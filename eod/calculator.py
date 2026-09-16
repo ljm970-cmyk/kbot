@@ -259,12 +259,17 @@ class EndOfDayCalculator:
         result.cycle_closed = t_result.cycle_closed
 
         # 5) 사이클 종료 처리 — 잔금은 이월한다 (원금으로 되돌리지 않는다)
-        if state.holdings <= 0:
+        # 보유 0 이어도 그날 체결이 없었으면 종료가 아니다.
+        # 시작 전(아직 아무것도 안 산 상태)과 완주 후를 구분해야 한다.
+        # 구분하지 않으면 매일 "사이클 종료" 가 뜬다.
+        if state.holdings <= 0 and tagged:
             state.avg_price = 0.0
             state.T = 0.0
             state.mode = "normal"
             state.reverse_first_day = False
             result.cycle_closed = True
+        elif state.holdings <= 0:
+            result.cycle_closed = False
 
         # 6) 당일 미체결 만료
         self.registry.expire_open_orders(trade_date, state.ticker)

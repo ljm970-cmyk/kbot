@@ -426,8 +426,13 @@ class SchedulerEngine:
         이 단계가 없으면 봇은 어긋난 상태를 스스로 알아차리지 못하고
         잘못된 평단 기준으로 매일 주문을 낸다.
         """
+        # get_position 은 "조회 실패" 와 "보유 0주" 를 모두 None 으로 돌려준다.
+        # 그대로 넘기면 대조가 건너뛰어져, 수량 검증이라는 회로차단기의
+        # 핵심이 무력화된다. 예외 여부로 둘을 가른다.
         try:
             position = await self.kiwoom.get_position(ticker, exchange)
+            if position is None:
+                position = {"poss_qty": 0, "qty": 0, "avg_price": 0.0}
         except Exception as e:
             logger.warning("[%s] 증권사 잔고 조회 실패: %s", ticker, e)
             position = None

@@ -1,22 +1,5 @@
-# ============================================================
-# kbot systemd 서비스
-#
-# 설치
-#   sudo cp deploy/kbot.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now kbot
-#
-# 관리
-#   sudo systemctl status kbot
-#   sudo systemctl restart kbot
-#   sudo journalctl -u kbot -f
-#
-# 경로를 바꾸려면 아래 세 곳을 함께 수정한다.
-#   User / WorkingDirectory / ExecStart / ReadWritePaths
-# ============================================================
-
 [Unit]
-Description=kbot - 무한매수법 자동매매
+Description=kbot 무한매수법 자동매매 (DRY RUN)
 After=network-online.target
 Wants=network-online.target
 
@@ -24,45 +7,31 @@ Wants=network-online.target
 Type=simple
 User=ljm970
 Group=ljm970
-
 WorkingDirectory=/home/ljm970/kbot
 
-Environment="PYTHONPATH=/home/ljm970/kbot"
-Environment="PYTHONUNBUFFERED=1"
-Environment="TZ=Asia/Seoul"
-# .env 는 config/settings.py 가 <프로젝트 루트>/.env 에서 찾는다.
-# 다른 위치에 두려면 아래 줄의 주석을 풀고 경로를 지정한다.
-# Environment="KBOT_ENV_FILE=/home/ljm970/kbot/.env"
+Environment=PYTHONPATH=/home/ljm970/kbot
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Asia/Seoul
+# 주문 미전송. 실운영 전까지 절대 지우지 말 것.
+Environment=KBOT_DRY_RUN=true
 
 ExecStart=/home/ljm970/kbot/venv/bin/python /home/ljm970/kbot/main.py
 
-# SIGTERM 을 받아 스케줄러·WebSocket·API 세션을 정리한다 (main.py 가 처리).
-# KillMode=process 는 자식만 남겨 좀비를 만들 수 있어 control-group 을 쓴다.
 KillSignal=SIGTERM
 KillMode=control-group
 TimeoutStopSec=30
-
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
-MemoryMax=1G
-CPUQuota=80%
-
-# 로그는 main.py 가 로테이션과 함께 파일로 남긴다.
-# 여기서는 journald 로만 보내 이중 기록을 피한다.
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=kbot
-
-# 보안
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=false
-# 프로젝트 디렉토리 전체가 쓰기 가능해야 한다 (data/, logs/ 모두 여기 있다)
 ReadWritePaths=/home/ljm970/kbot
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kbot
 
 [Install]
 WantedBy=multi-user.target

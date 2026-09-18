@@ -80,6 +80,9 @@ class SchedulerEngine:
     """매매 스케줄러"""
 
     PLAN_HOUR = 12          # 매일 이 시각(KST)에 그날 일정을 계산한다
+    #: 아침 요약 발송 시각.
+    #: EOD 리포트는 05:30 에 오는데 대개 자고 있어 읽히지 않는다.
+    BRIEF_HOUR = 8
     #: 토큰 갱신 주기(시간). minute 필드는 0~59 라 "*/60" 은 쓸 수 없다.
     TOKEN_REFRESH_HOURS = 1
     #: 헬스체크 주기(분)
@@ -127,6 +130,11 @@ class SchedulerEngine:
         self.scheduler.add_job(
             self._health_check, CronTrigger(minute=f"*/{self.HEALTH_CHECK_MIN}", timezone=KST),
             id="health_check", replace_existing=True,
+        )
+        self.scheduler.add_job(
+            self._morning_brief,
+            CronTrigger(hour=self.BRIEF_HOUR, minute=0, timezone=KST),
+            id="morning_brief", replace_existing=True, misfire_grace_time=3600,
         )
         self.scheduler.start()
         logger.info("스케줄러 시작 (KST)")
@@ -491,6 +499,16 @@ class SchedulerEngine:
         except Exception as e:
             logger.exception("토큰 갱신 실패")
             await self.notifier.send(f"⚠ 키움 토큰 갱신 실패: {e}")
+
+    async def _morning_brief(self) -> None:
+        """아침 요약. 어제 결과와 오늘 예정을 한 번 더 알린다."""
+        from core.ops import morning_brief
+        try:
+            await self.notifier.send(
+                morning_brief(self.state_mgr, self.registry, self))
+        except Exception as e:
+            logger.exception("아침 요약 생성 실패")
+            await self.notifier.send(f"⚠ 아침 요약 생성 실패: {e}")
 
     async def _health_check(self) -> None:
         try:

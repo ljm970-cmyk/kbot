@@ -141,6 +141,9 @@ async def run(config: AppConfig, check_only: bool = False) -> int:
     from scheduler.engine import SchedulerEngine
     from tg_bot.bot import create_telegram_bot
 
+    from core.ops import mark_started
+    mark_started()          # /health 의 가동시간 기준점
+
     logger.info("설정\n%s", config.summary())
 
     # --- 키움 API ---

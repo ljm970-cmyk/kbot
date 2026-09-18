@@ -463,6 +463,24 @@ class OrderRegistry:
             lines.append(f"  {r.side:4} {r.qty:>4}주 {p:>10}  [{r.tag}] {mark}")
         return "\n".join(lines)
 
+    def bot_reserved_orders(self, ticker: str = "") -> dict[str, OrderRecord]:
+        """봇이 접수한 예약주문. {rsrv_ord_no: 기록}
+
+        /panic 이 계좌의 모든 예약주문이 아니라 봇이 낸 것만 취소하도록,
+        원장에 남은 예약번호를 돌려준다. 사용자가 직접 건 주문은
+        원장에 없으므로 자동으로 제외된다.
+
+        취소·거부·만료된 건은 이미 살아있지 않으므로 뺀다.
+        """
+        with self._conn() as c:
+            sql = (f"SELECT {_COLUMNS} FROM orders "
+                   f"WHERE rsrv_ord_no != '' AND status NOT IN (?,?,?)")
+            args = [OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.EXPIRED]
+            if ticker:
+                sql += " AND ticker=?"
+                args.append(ticker.upper())
+            return {r["rsrv_ord_no"]: self._row(r) for r in c.execute(sql, args)}
+
     # ============================================================
     # 거래 이력
     # ============================================================

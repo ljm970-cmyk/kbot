@@ -153,6 +153,10 @@ class KbotTelegramBot:
         app.add_handler(CommandHandler("unhalt", self._cmd_unhalt))
         app.add_handler(CommandHandler("report", self._cmd_report))
         app.add_handler(CommandHandler("stats", self._cmd_stats))
+        app.add_handler(CommandHandler("health", self._cmd_health))
+        app.add_handler(CommandHandler("panic", self._cmd_panic))
+        app.add_handler(CallbackQueryHandler(
+            self._on_panic_callback, pattern=r"^panic:"))
 
         # ========== 대화형 설정 마법사 ==========
         setup_handler = self.setup_wizard.get_handler()
@@ -340,6 +344,76 @@ class KbotTelegramBot:
             logger.exception("강제 EOD 실패")
             return await self._safe_send(update, f"EOD 정산 실패: {e}")
         await self._safe_send(update, "EOD 정산을 마쳤습니다. 결과는 위 리포트를 확인하세요.")
+
+    # ============================================================
+    # 운영 상태 · 긴급 정지
+    # ============================================================
+
+    async def _cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """운영 상태: /health"""
+        from core.ops import health_report
+        try:
+            text = health_report(self.config, self.kiwoom, self.state,
+                                 self.scheduler, self.ws)
+        except Exception as e:
+            logger.exception("헬스체크 실패")
+            text = f"상태 확인 실패: {e}"
+        await self._safe_send(update, text)
+
+    async def _cmd_panic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """긴급 정지: /panic
+
+        되돌리기 어려운 동작이므로 한 번 더 확인을 받는다.
+        """
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        tickers = self.state.list_tickers()
+        if not tickers:
+            return await self._safe_send(update, "설정된 종목이 없습니다.")
+
+        can_cancel = self.kiwoom.can_cancel_now()
+        lines = [
+            "긴급 정지를 실행할까요?",
+            "",
+            f"  대상 종목  {', '.join(tickers)}",
+            "  신규 주문을 멈추고,",
+            "  봇이 낸 예약주문을 취소합니다.",
+            "",
+            "  직접 거신 주문은 건드리지 않습니다.",
+        ]
+        if not can_cancel:
+            lines += ["",
+                      "  ⚠ 지금은 취소 가능 시간(08:00~22:25 KST)이 아닙니다.",
+                      "    정지는 되지만 취소는 실패합니다."]
+
+        await update.effective_message.reply_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("실행", callback_data="panic:go"),
+                 InlineKeyboardButton("취소", callback_data="panic:no")],
+            ]))
+
+    async def _on_panic_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        from core.ops import panic_stop
+        from kiwoom.constants import exchange_of
+
+        query = update.callback_query
+        await query.answer()
+        if query.data != "panic:go":
+            return await query.edit_message_text("긴급 정지를 취소했습니다.")
+
+        registry = getattr(self.scheduler, "registry", None)
+        if registry is None:
+            return await query.edit_message_text(
+                "주문 원장에 접근할 수 없어 취소를 진행할 수 없습니다.")
+
+        await query.edit_message_text("긴급 정지 실행 중...")
+        try:
+            res = await panic_stop(self.kiwoom, self.state, registry, exchange_of)
+        except Exception as e:
+            logger.exception("긴급 정지 실패")
+            return await query.edit_message_text(f"긴급 정지 실패: {e}")
+        await query.edit_message_text(res.report())
 
     # ============================================================
     # 누적 통계
@@ -661,6 +735,10 @@ class KbotTelegramBot:
             return await self.cmd_handler.cmd_force_calc(update, context)
         elif "일정" in text or "스케줄" in text or "다음장" in text:
             return await self._cmd_next(update, context)
+        elif "상태점검" in text or "헬스" in text:
+            return await self._cmd_health(update, context)
+        elif "패닉" in text or "비상" in text:
+            return await self._cmd_panic(update, context)
         elif "긴급정지" in text or "주문정지" in text:
             return await self._cmd_halt(update, context)
         elif "정지해제" in text or "해제" in text:
@@ -752,7 +830,9 @@ class KbotTelegramBot:
             "/pause — 주문 접수 일시정지\n"
             "/resume — 재개\n"
             "/run &lt;작업&gt; — 즉시 실행 (plan/submit/verify/eod)\n"
-            "/halt — 신규 주문 긴급 정지\n"
+            "/health — 운영 상태 점검\n"
+            "/panic — 긴급 정지 (정지 + 예약주문 취소)\n"
+            "/halt — 신규 주문만 정지\n"
             "/unhalt &lt;종목&gt; — 정지 해제\n"
             "/report [종목] — 매매 이력 리포트\n"
             "/stats [종목] — 누적 성과 (사이클·승률·손익)\n\n"

@@ -340,15 +340,25 @@ class CommandsHandler:
             
             division = cfg.get('division', 40)
             principal = cfg.get('principal', 0)
-            fee_display = cfg.get('fee_display', 0.25)
-            auto = "ON" if cfg.get('settings', {}).get('auto_order', True) else "OFF"
+            # 수수료는 실제로 쓰이는 fee_rate 에서 계산한다.
+            # fee_display 는 마법사로 설정할 때만 저장돼서, 다른 경로로
+            # 바꾸면 기본값 0.25% 가 그대로 보였다.
+            fee_display = f"{float(cfg.get('fee_rate', 0.0007)) * 100:.3f}".rstrip("0").rstrip(".")
+
+            # "자동주문 ON" 은 실제 동작과 연결돼 있지 않았다.
+            # 주문이 실제로 나가는지는 회로차단기 상태가 결정한다.
+            st = self.state.get_state(ticker)
+            if st is not None and getattr(st, "halted", False):
+                auto = f"정지 ({st.halt_reason[:30]})"
+            else:
+                auto = "가동"
             
             msg += (
                 f"💎 <b>{html.escape(ticker)}</b>\n"
                 f"├ 분할: <code>{division}</code>\n"
                 f"├ 원금: <code>${principal:,.0f}</code>\n"
                 f"├ 수수료: <code>{fee_display}%</code>\n"
-                f"└ 자동주문: <code>{auto}</code>\n\n"
+                f"└ 주문: <code>{auto}</code>\n\n"
             )
             
             # 종목별 버튼
@@ -362,10 +372,12 @@ class CommandsHandler:
         msg += f"🌍 <b>전역</b>\n{self.tz.get_dst_info()[1]}\n"
         
         keyboard.extend([
-            [InlineKeyboardButton("⏰ 자동주문 토글", callback_data="CONFIG:AUTO"),
-             InlineKeyboardButton("🔔 알림 토글", callback_data="CONFIG:NOTIFY")],
-            [InlineKeyboardButton("🧪 샌드박스 ON", callback_data="CONFIG:SANDBOX:ON"),
-             InlineKeyboardButton("🚀 샌드박스 OFF", callback_data="CONFIG:SANDBOX:OFF")],
+            # 주문 정지/해제만 남긴다.
+            # 샌드박스(모의투자) 전환은 실행 중에 바꾸면 위험해서 뺐다 —
+            # 모드는 서비스 설정(KIWOOM_MOCK)으로만 바꾼다.
+            # 알림 토글은 구현이 없어서 뺐다.
+            [InlineKeyboardButton("⏸ 주문 정지", callback_data="CONFIG:HALT"),
+             InlineKeyboardButton("▶ 정지 해제", callback_data="CONFIG:UNHALT")],
         ])
         
         await self._safe_reply(update.effective_message, msg,

@@ -38,13 +38,23 @@ class SetupWizard:
     def get_handler(self) -> ConversationHandler:
         return ConversationHandler(
             entry_points=[CommandHandler('start', self.cmd_start)],
+            # 각 단계의 버튼 처리기에 패턴을 건다.
+            #
+            # 패턴 없이 두면 마법사 대화가 끝나지 않은 채 남았을 때
+            # 이후 누르는 모든 버튼(설정·주문·동기화 등)을 마법사가
+            # 가로채 조용히 삼킨다. 대화 상태는 메모리에만 있어 봇을
+            # 재시작하기 전까지 풀리지 않는다.
             states={
-                SELECT_TICKER_MODE: [CallbackQueryHandler(self.on_ticker_mode)],
-                SELECT_DIVISION: [CallbackQueryHandler(self.on_division)],
+                SELECT_TICKER_MODE: [CallbackQueryHandler(
+                    self.on_ticker_mode, pattern=r"^(SINGLE:(TQQQ|SOXL)|BOTH)$")],
+                SELECT_DIVISION: [CallbackQueryHandler(
+                    self.on_division, pattern=r"^(20|40)$")],
                 INPUT_PRINCIPAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_principal)],
                 SET_FEE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_fee)],
-                ADD_ANOTHER: [CallbackQueryHandler(self.on_add_another)],
-                CONFIRM: [CallbackQueryHandler(self.on_confirm)],
+                ADD_ANOTHER: [CallbackQueryHandler(
+                    self.on_add_another, pattern=r"^(KEEP_SAME|NEW_INPUT)$")],
+                CONFIRM: [CallbackQueryHandler(
+                    self.on_confirm, pattern=r"^(CONFIRM|RESTART)$")],
             },
             fallbacks=[
                 CommandHandler('cancel', self.cmd_cancel),

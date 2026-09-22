@@ -707,6 +707,10 @@ class KbotTelegramBot:
         
         text = update.effective_message.text.strip()
 
+        # 설정 값 입력 대기 중이면 먼저 소비한다.
+        if await self._on_config_text(update, context):
+            return
+
         # 보정 진행 중이면 숫자 입력을 먼저 소비한다.
         # (수량·가격을 받는 단계에서 한글 라우팅으로 새면 안 된다)
         if await self._on_fix_text(update, context):
@@ -766,49 +770,113 @@ class KbotTelegramBot:
     # ============================================================
     
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """InlineKeyboardButton 콜백"""
-        logger.info(f"[콜백수신] data={update.callback_query.data if update.callback_query else None}")
+        """InlineKeyboardButton 콜백.
+
+        원본은 대부분의 버튼이 같은 화면을 다시 띄우거나 "처리: ..." 만
+        출력했다. 버튼마다 실제 동작을 연결한다.
+        """
         query = update.callback_query
+        data = query.data or ""
+        logger.info("[콜백수신] data=%s", data)
         await query.answer()
-        
-        data = query.data
-        
-        if data == "SYNC:NOW" or data.startswith("SYNC"):
-            await self.cmd_handler.cmd_status(update, context)
-        
-        elif data.startswith("ORDERS:"):
-            # 특정 종목 주문 내역
-            ticker = data.split(":")[1] if ":" in data else None
-            if ticker:
-                context.args = [ticker]
-            await self.cmd_handler.cmd_orders(update, context)
-        
-        elif data.startswith("CONFIG:"):
-            action = data.split(":")[1] if ":" in data else None
-            ticker = data.split(":")[2] if data.count(":") >= 2 else None
-            
-            if action == "EDIT" and ticker:
-                # 설정 편집 메뉴
-                await self.cmd_handler.cmd_config(update, context)
-            else:
-                await self.cmd_handler.cmd_config(update, context)
-        
-        elif data == "CALC:FORCE":
-            await self.cmd_handler.cmd_force_calc(update, context)
-        
-        elif data.startswith("HIST:"):
-            await self.cmd_handler.cmd_history(update, context)
-        
-        elif data == "RESET:CANCEL":
-            await query.edit_message_text("❌ 취소됨")
-        
-        elif data.startswith("MODE:"):
-            # 모드 전환 (수동)
-            pass
-        
-        else:
-            await query.edit_message_text(f"처리: {data}")
-    
+
+        parts = data.split(":")
+        head = parts[0]
+        tickers = self.state.list_tickers()
+
+        # ── 동기화 · 조회 ──
+        if head == "SYNC":
+            return await self.cmd_handler.cmd_status(update, context)
+
+        if head == "ORDERS":
+            # ORDERS:SOXL 이면 종목 지정, ORDERS:REFRESH/VIEW 는 전체
+            arg = parts[1] if len(parts) > 1 else ""
+            context.args = [arg] if arg in tickers else []
+            return await self.cmd_handler.cmd_orders(update, context)
+
+        if head == "HIST":
+            return await self.cmd_handler.cmd_history(update, context)
+
+        if data == "CALC:FORCE":
+            return await self._cmd_force_eod(update, context)
+
+        if data == "TICKER:ADD":
+            return await self._safe_send(
+                update, "종목 추가는 /start 로 진행합니다.\n"
+                        "개인 보유 종목과 겹치지 않는지 먼저 확인하세요.")
+
+        # ── 주문 취소 ──
+        if head == "ORDER":
+            if data == "ORDER:CANCEL_ALL":
+                # 일괄 취소는 되돌리기 어려우므로 /panic 의 확인 절차를 탄다
+                return await self._cmd_panic(update, context)
+            return await self._safe_send(
+                update, "개별 주문 취소는 증권사 앱에서 해주세요.\n"
+                        "봇이 낸 주문을 모두 거두려면 /panic 을 쓰세요.")
+
+        # ── 설정 ──
+        if head == "CONFIG":
+            action = parts[1] if len(parts) > 1 else ""
+            ticker = parts[2] if len(parts) > 2 else ""
+
+            if action in ("DIV", "SEED", "FEE") and ticker:
+                return await self._prompt_config_edit(update, context, ticker, action)
+
+            if action == "HALT":
+                context.args = []
+                return await self._cmd_halt(update, context)
+
+            if action == "UNHALT":
+                if len(tickers) == 1:
+                    context.args = tickers
+                else:
+                    context.args = []
+                return await self._cmd_unhalt(update, context)
+
+            # EDIT 등 나머지는 설정 메뉴로
+            context.args = []
+            return await self.cmd_handler.cmd_config(update, context)
+
+        if data == "RESET:CANCEL":
+            return await query.edit_message_text("취소했습니다.")
+
+        logger.warning("처리하지 않는 버튼: %s", data)
+        await self._safe_send(update, f"이 버튼은 지원하지 않습니다 ({data}).")
+
+    # ── 설정 값 입력 ────────────────────────────────────────────
+
+    _CONFIG_KEYS = {
+        "DIV":  ("division",  "분할수", "20 또는 40"),
+        "SEED": ("principal", "원금",   "달러 금액 (예: 3500)"),
+        "FEE":  ("fee",       "수수료", "퍼센트 (예: 0.07)"),
+    }
+
+    async def _prompt_config_edit(self, update, context, ticker: str, action: str):
+        key, label, example = self._CONFIG_KEYS[action]
+        context.user_data["config_edit"] = (ticker, key, label)
+        await self._safe_send(
+            update,
+            f"{ticker} {label}을(를) 보내주세요.\n"
+            f"  형식: {example}\n\n"
+            f"취소하려면 '취소' 라고 보내세요.")
+
+    async def _on_config_text(self, update, context) -> bool:
+        """설정 값 입력 대기 중이면 처리한다. 처리했으면 True."""
+        pending = context.user_data.get("config_edit")
+        if not pending:
+            return False
+
+        text = (update.effective_message.text or "").strip()
+        context.user_data.pop("config_edit", None)
+        if text in ("취소", "cancel"):
+            await self._safe_send(update, "설정 변경을 취소했습니다.")
+            return True
+
+        ticker, key, _ = pending
+        context.args = [ticker, key, text.replace(",", "").replace("$", "")]
+        await self.cmd_handler.cmd_config(update, context)
+        return True
+
     # ============================================================
     # 도움말
     # ============================================================

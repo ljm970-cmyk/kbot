@@ -182,6 +182,7 @@ class SchedulerEngine:
             ("submit_target_sell", sched.premarket, self.submit_target_sells),
             ("submit_loc_orders", sched.submit_loc, self.submit_loc_orders),
             ("verify_reserved", sched.verify, self.verify_reserved),
+            ("verify_after_open", sched.verify_open, self.verify_reserved),
             ("run_eod", sched.eod, self.run_eod),
         ]
         # 주문 1시간 전 자금 점검 — 매일 부족분을 채우는 운용용
@@ -311,7 +312,11 @@ class SchedulerEngine:
             record_id = self.registry.record_submission(trade_date, ticker, order)
             try:
                 res = await self._place(ticker, exchange, order)
-                self.registry.attach_rsrv_ord_no(record_id, res.rsrv_ord_no)
+                # 실시간 주문은 주문번호, 예약주문은 예약번호를 남긴다
+                if getattr(res, "rsrv_ord_no", ""):
+                    self.registry.attach_rsrv_ord_no(record_id, res.rsrv_ord_no)
+                elif getattr(res, "ord_no", ""):
+                    self.registry.attach_ord_no(record_id, res.ord_no)
                 submitted += 1
             except KiwoomOrderUncertainError as e:
                 # 접수됐는지 알 수 없다. 원장에 남겨두고(삭제하지 않는다)
@@ -357,13 +362,28 @@ class SchedulerEngine:
         return [o for o in plan.orders if o.window != SubmitWindow.PRE_MARKET]
 
     async def _place(self, ticker: str, exchange: str, order: PlannedOrder):
-        """PlannedOrder → 키움 예약주문"""
-        if order.side == "buy":
-            return await self.kiwoom.reserve_buy(
-                ticker, exchange, order.qty, order.trade_type, order.price)
+        """PlannedOrder → 키움 주문.
+
+        지정가·LOC 는 실시간 주문으로 프리장에 바로 낸다. MOC 만 예약주문.
+
+        예약주문은 정규장 개장(22:30) 때 실주문으로 넘어가고, 거부 여부도
+        그때 결정된다. 실시간으로 내면
+          - 지정가매도가 프리장부터 살아 있다 (방법론 6)
+          - 증거금·가격 거부가 접수 즉시 드러나, 입금·재접수할 시간이 생긴다
+          - 예약주문의 날짜 규칙·취소 가능 시간(08:00~22:25) 제약이 없다
+
+        실측(2026-09-22 17:25, 17:29): 실시간 지정가·LOC 모두 프리장에 바로
+        접수되어 미체결에 표시됐다. 현재가 대비 −29% LOC 도 받아졌다.
+
+        MOC 는 리버스모드 첫날에만 쓰는데 프리장 실시간 접수가 아직
+        확인되지 않아 예약주문으로 둔다.
+        """
         if order.trade_type == TradeType.MOC:
             return await self.kiwoom.reserve_moc_sell(ticker, exchange, order.qty)
-        return await self.kiwoom.reserve_sell(
+        if order.side == "buy":
+            return await self.kiwoom.buy(
+                ticker, exchange, order.qty, order.trade_type, order.price)
+        return await self.kiwoom.sell(
             ticker, exchange, order.qty, order.trade_type, order.price)
 
     # ------------------------------------------------------------
@@ -388,14 +408,48 @@ class SchedulerEngine:
                 await self.notifier.send(f"⚠ [{ticker}] 예약주문 검증 실패: {e}")
                 continue
 
-            if not bad:
-                continue
+            if bad:
+                lines = [f"⚠ [{ticker}] 예약주문 {len(bad)}건 거부"]
+                for b in bad:
+                    self.registry.mark_rejected_by_rsrv_no(b["rsrv_ord_no"], b["reason"])
+                    lines.append(f"  {b['ord_qty']}주 @{b['ord_uv']:.2f} — {b['reason']}")
+                await self.notifier.send("\n".join(lines))
 
-            lines = [f"⚠ [{ticker}] 예약주문 {len(bad)}건 거부"]
-            for b in bad:
-                self.registry.mark_rejected_by_rsrv_no(b["rsrv_ord_no"], b["reason"])
-                lines.append(f"  {b['ord_qty']}주 @{b['ord_uv']:.2f} — {b['reason']}")
-            await self.notifier.send("\n".join(lines))
+            await self._verify_live(ticker)
+
+    async def _verify_live(self, ticker: str) -> None:
+        """봇이 낸 실시간 주문이 미체결에 살아 있는지 확인한다.
+
+        LOC 는 종가에만 체결되므로 장중에 미체결에서 사라졌다면 거부됐거나
+        누가 취소한 것이다. 그대로 두면 그날 매수가 빠진 줄 모른다.
+
+        지정가매도는 프리장·장중에 체결될 수 있어서, 사라졌다고 이상으로
+        보지 않는다 (체결은 EOD 에서 반영된다).
+
+        세션이 바뀔 때(프리장 → 정규장) 실시간 주문이 유지되는지도 이
+        검사로 확인된다.
+        """
+        ours = self.registry.bot_live_orders(ticker)
+        if not ours:
+            return
+        try:
+            live = {str(o["ord_no"]) for o in
+                    await self.kiwoom.get_open_orders(ticker, exchange_of(ticker))}
+        except Exception as e:
+            logger.warning("[%s] 미체결 조회 실패: %s", ticker, e)
+            return
+
+        missing = [r for no, r in ours.items()
+                   if no not in live and r.trade_type == TradeType.LOC]
+        if not missing:
+            return
+        lines = [f"⚠ [{ticker}] LOC 주문 {len(missing)}건이 미체결에서 사라졌습니다",
+                 "  종가 전에는 체결될 수 없으니 거부·취소됐을 가능성이 큽니다."]
+        for r in missing:
+            side = "매수" if r.side == "buy" else "매도"
+            lines.append(f"  {side} {r.qty}주 @{r.price:.2f} [{r.tag}]")
+        lines.append("  키움 앱 주문내역에서 사유를 확인하세요.")
+        await self.notifier.send("\n".join(lines))
 
     # ------------------------------------------------------------
     # EOD 정산

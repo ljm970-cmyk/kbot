@@ -481,6 +481,21 @@ class OrderRegistry:
                 args.append(ticker.upper())
             return {r["rsrv_ord_no"]: self._row(r) for r in c.execute(sql, args)}
 
+    def bot_live_orders(self, ticker: str = "") -> dict[str, OrderRecord]:
+        """봇이 낸 실시간 주문 중 아직 살아 있는 것. {ord_no: 기록}
+
+        지정가매도는 프리장부터 걸기 위해 실시간 주문으로 낸다.
+        /panic 이 예약주문만 거두면 이 주문이 그대로 남는다.
+        """
+        with self._conn() as c:
+            sql = (f"SELECT {_COLUMNS} FROM orders "
+                   f"WHERE ord_no != '' AND rsrv_ord_no = '' AND status IN (?,?)")
+            args = [OrderStatus.SUBMITTED, OrderStatus.PARTIAL]
+            if ticker:
+                sql += " AND ticker=?"
+                args.append(ticker.upper())
+            return {r["ord_no"]: self._row(r) for r in c.execute(sql, args)}
+
     # ============================================================
     # 거래 이력
     # ============================================================

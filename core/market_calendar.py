@@ -230,6 +230,12 @@ def premarket_open_kst(d: date) -> datetime:
     return open_et.astimezone(KST)
 
 
+def regular_open_kst(d: date) -> datetime:
+    """정규장 개장(09:30 ET)을 한국시각으로. 서머타임 22:30, 아니면 23:30."""
+    open_et = datetime(d.year, d.month, d.day, 9, 30, tzinfo=ET)
+    return open_et.astimezone(KST)
+
+
 # ================================================================
 # 하루 작업 시각
 # ================================================================
@@ -243,14 +249,23 @@ class DaySchedule:
     APScheduler 에 의존하지 않으므로 단독으로 검증할 수 있다.
     """
     session: date
-    premarket: datetime      # 지정가매도 접수 (방법론 6)
-    submit_loc: datetime     # LOC/MOC 예약 접수
-    verify: datetime         # 예약주문 검증 (ust21205)
+    premarket: datetime      # 지정가매도 접수 (방법론 6) — 실시간 주문
+    submit_loc: datetime     # LOC 실시간 접수 (MOC 는 예약)
+    verify: datetime         # 예약주문 검증 (ust21205) — 접수 확인
+    verify_open: datetime    # 개장 후 재검증 — 실주문 전환 시 거부 확인
     eod: datetime            # 정산
     early_close: bool
 
-    #: 프리장 시작 후 LOC 접수까지 대기
-    LOC_DELAY = timedelta(minutes=15)
+    #: 프리장 시작 후 지정가매도 접수까지 대기.
+    #: 개장 정각에 넣으면 세션 전환 순간과 겹쳐 거부될 수 있다.
+    TARGET_DELAY = timedelta(minutes=1)
+    #: 프리장 시작 후 LOC 접수까지 대기. 지정가매도 바로 다음에 낸다.
+    #: (둘 다 실시간 주문이라 프리장에 함께 걸린다)
+    LOC_DELAY = timedelta(minutes=2)
+    #: 정규장 개장 후 재검증까지 대기.
+    #: 예약주문은 정규장 개장 때 실주문으로 넘어가고, 증거금·가격제한폭
+    #: 거부도 그때 결정된다. 프리장 검증만으로는 거부를 잡지 못한다.
+    OPEN_VERIFY_DELAY = timedelta(minutes=10)
     #: 접수 후 검증까지 대기 (접수 직후엔 조회에 안 뜰 수 있다)
     VERIFY_DELAY = timedelta(minutes=35)
     #: 마감 후 정산까지 대기 (체결 데이터 반영 시간)
@@ -261,9 +276,10 @@ class DaySchedule:
         pre = premarket_open_kst(session)
         return cls(
             session=session,
-            premarket=pre,
+            premarket=pre + cls.TARGET_DELAY,
             submit_loc=pre + cls.LOC_DELAY,
             verify=pre + cls.VERIFY_DELAY,
+            verify_open=regular_open_kst(session) + cls.OPEN_VERIFY_DELAY,
             eod=market_close_kst(session) + cls.EOD_DELAY,
             early_close=is_early_close(session),
         )
@@ -272,8 +288,9 @@ class DaySchedule:
         tag = " · 조기폐장" if self.early_close else ""
         return (f"{self.session} 일정{tag}\n"
                 f"  지정가매도 {self.premarket:%m/%d %H:%M}\n"
-                f"  LOC 예약   {self.submit_loc:%m/%d %H:%M}\n"
-                f"  예약 검증  {self.verify:%m/%d %H:%M}\n"
+                f"  LOC 접수   {self.submit_loc:%m/%d %H:%M}\n"
+                f"  주문 검증  {self.verify:%m/%d %H:%M}\n"
+                f"  개장 검증  {self.verify_open:%m/%d %H:%M}\n"
                 f"  EOD 정산   {self.eod:%m/%d %H:%M}")
 
 

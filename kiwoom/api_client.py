@@ -89,7 +89,9 @@ class KiwoomOrderUncertainError(Exception):
 #: 키움은 데이터가 없을 때도 return_code != 0 으로 응답한다.
 #: 에러로 처리하면 예약주문이 하나도 없는 날 검증 단계가 통째로 실패한다.
 EMPTY_RESULT_HINTS = ("자료가 존재하지 않습니다", "조회할 자료가 없습니다",
-                      "데이터가 없습니다")
+                      "데이터가 없습니다", "자료가 없습니다",
+                      # 실측: 미체결이 없으면 ust21050 이 이렇게 응답한다
+                      "내역이 없습니다")
 
 
 def is_empty_result(message: str) -> bool:

@@ -7,7 +7,7 @@
 
 /halt 과의 차이
     /halt   신규 주문만 막는다. 접수된 예약주문은 그대로 살아 있다.
-    /panic  거기에 더해 봇이 낸 예약주문을 취소한다.
+    /panic  거기에 더해 봇이 낸 예약주문과 실시간 주문을 취소한다.
 
 계좌의 모든 예약주문을 취소하지 않는다. 사용자가 직접 건 주문은
 원장에 없으므로 대상에서 빠진다.
@@ -215,6 +215,34 @@ async def panic_stop(kiwoom, state_mgr, registry, exchange_of) -> PanicResult:
                      f"{int(row.get('ord_qty') or 0)}주 @{row.get('ord_uv', '')}")
             try:
                 await kiwoom.cancel_reserved(rsrv_dt, no, ticker, ex)
+                registry.set_status(ours[no].id, "cancelled", "/panic 으로 취소")
+                result.cancelled.append(label)
+            except Exception as e:
+                msg = str(e).split(":")[-1].strip()
+                result.failed.append((label, msg[:60]))
+
+    # 3) 봇이 낸 실시간 주문 취소 (프리장부터 거는 지정가매도).
+    #    예약주문과 달리 취소 가능 시간 제약이 없다.
+    for ticker in state_mgr.list_tickers():
+        ours = registry.bot_live_orders(ticker)
+        if not ours:
+            continue
+        try:
+            ex = exchange_of(ticker)
+            live = await kiwoom.get_open_orders(ticker, ex)
+        except Exception as e:
+            logger.exception("[%s] 미체결 조회 실패", ticker)
+            result.failed.append((ticker, f"미체결 조회 실패: {e}"))
+            continue
+        for row in live:
+            no = str(row.get("ord_no", ""))
+            if no not in ours:
+                continue
+            label = (f"{ticker} {'매수' if row.get('side') == 'buy' else '매도'} "
+                     f"{int(row.get('remain_qty') or row.get('ord_qty') or 0)}주 "
+                     f"@{row.get('ord_uv', '')} (실시간)")
+            try:
+                await kiwoom.cancel(no, ticker, ex)
                 registry.set_status(ours[no].id, "cancelled", "/panic 으로 취소")
                 result.cancelled.append(label)
             except Exception as e:

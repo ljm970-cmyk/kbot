@@ -184,6 +184,11 @@ class SchedulerEngine:
             ("verify_reserved", sched.verify, self.verify_reserved),
             ("run_eod", sched.eod, self.run_eod),
         ]
+        # 주문 1시간 전 자금 점검 — 매일 부족분을 채우는 운용용
+        from datetime import timedelta as _td
+        jobs.append(("funding_reminder", sched.premarket - _td(hours=1),
+                     self._funding_reminder))
+
         for job_id, when, fn in jobs:
             if when <= now:
                 logger.info("%s 시각(%s)이 이미 지나 건너뜁니다", job_id, when)
@@ -250,21 +255,54 @@ class SchedulerEngine:
         if plan.warnings and window == SubmitWindow.PRE_MARKET:
             await self.notifier.send(f"[{ticker}] " + "\n".join(plan.warnings))
 
-        # 중복 접수 방지 — 같은 날 같은 주문을 두 번 내면 포지션이 두 배가 된다
-        dup = self.registry.already_submitted(
-            trade_date, ticker, [o.tag for o in orders])
+        # 중복 접수 방지 — 같은 날 같은 주문을 두 번 내면 포지션이 두 배가 된다.
+        #
+        # 창구 단위가 아니라 주문 단위로 걸러낸다. 자금 부족으로 매수만
+        # 건너뛴 날, 입금 후 /run loc 로 다시 실행하면 이미 낸 매도는 빼고
+        # 매수만 접수되어야 한다.
+        dup = set(self.registry.already_submitted(
+            trade_date, ticker, [o.tag for o in orders]))
         if dup:
-            logger.warning("[%s] %s 는 이미 접수됨 (%s) — 건너뜁니다",
-                           ticker, label, ", ".join(dup))
-            await self.notifier.send(
-                f"[{ticker}] {label} 는 이미 접수된 주문이 있어 건너뛰었습니다.\n"
-                f"  중복 태그: {', '.join(dup)}\n"
-                f"  다시 내려면 증권사 앱에서 기존 주문을 취소한 뒤 실행하세요."
-            )
-            return
+            skipped = [o for o in orders if o.tag in dup]
+            orders = [o for o in orders if o.tag not in dup]
+            logger.info("[%s] %s 중 이미 접수된 %d건 제외 (%s)",
+                        ticker, label, len(skipped), ", ".join(sorted(dup)))
+            if not orders:
+                await self.notifier.send(
+                    f"[{ticker}] {label} 는 모두 이미 접수돼 있어 건너뛰었습니다.")
+                return
+
+        # 자금 점검 — 매수만 해당. 매도는 돈이 없어도 낸다.
+        buys = [o for o in orders if o.side == "buy"]
+        if buys:
+            from core.funding import FundingCheck
+            need = round(sum(o.amount for o in buys)
+                         * (1 + state.fee_rate + 0.005), 2)
+            try:
+                ref_price = max(o.price or 0 for o in buys) or market.current_price
+                available = await self.kiwoom.available_usd(
+                    ticker, exchange_of(ticker), ref_price)
+            except Exception as e:
+                logger.warning("[%s] 매수 가능 금액 확인 실패: %s", ticker, e)
+                available = None
+
+            if available is not None:
+                chk = FundingCheck(need=need, available=available)
+                if not chk.ok:
+                    orders = [o for o in orders if o.side != "buy"]
+                    await self.notifier.send(
+                        f"[{ticker}] 달러가 부족해 오늘 매수를 건너뜁니다.\n"
+                        f"{chk.topup_text()}\n\n"
+                        + ("  매도 주문은 그대로 접수합니다.\n" if orders else "")
+                        + f"  입금한 뒤 /run loc 로 매수만 다시 접수할 수 있습니다\n"
+                        f"  (장 시작 전까지).")
+                    if not orders:
+                        return
 
         if self.config.dry_run:
-            await self.notifier.send(f"[DRY RUN] {ticker} {label}\n{plan.summary()}")
+            lines = "\n".join(f"  {o}" for o in orders)
+            await self.notifier.send(
+                f"[DRY RUN] {ticker} {label}\n{plan.summary().splitlines()[0]}\n{lines}")
             return
 
         exchange = exchange_of(ticker)
@@ -500,12 +538,43 @@ class SchedulerEngine:
             logger.exception("토큰 갱신 실패")
             await self.notifier.send(f"⚠ 키움 토큰 갱신 실패: {e}")
 
+    async def _available_by_ticker(self) -> dict:
+        """종목별 매수 가능 금액. 조회 실패한 종목은 빠진다."""
+        out = {}
+        for t in self.state_mgr.list_tickers():
+            st = self.state_mgr.get_state(t)
+            if st is None:
+                continue
+            try:
+                q = await self.kiwoom.get_quote(t, exchange_of(t))
+                ref = (q["prev_close"] or q["cur_price"]) * 1.15
+                out[t] = await self.kiwoom.available_usd(t, exchange_of(t), ref)
+            except Exception as e:
+                logger.warning("[%s] 매수 가능 금액 조회 실패: %s", t, e)
+        return out
+
+    async def _funding_reminder(self, session=None) -> None:
+        """주문 1시간 전, 달러가 모자라면 알린다."""
+        from core.funding import FundingCheck
+        avail = await self._available_by_ticker()
+        for t in self.state_mgr.list_tickers():
+            st = self.state_mgr.get_state(t)
+            if st is None or getattr(st, "halted", False) or t not in avail:
+                continue
+            chk = FundingCheck(need=st.next_buy_need, available=avail[t])
+            if not chk.ok:
+                await self.notifier.send(
+                    f"[{t}] 1시간 뒤 주문 접수 — 달러가 부족합니다.\n"
+                    f"{chk.topup_text()}\n"
+                    f"  입금하지 않으면 오늘 매수는 건너뛰고 매도만 접수합니다.")
+
     async def _morning_brief(self) -> None:
         """아침 요약. 어제 결과와 오늘 예정을 한 번 더 알린다."""
         from core.ops import morning_brief
         try:
+            avail = await self._available_by_ticker()
             await self.notifier.send(
-                morning_brief(self.state_mgr, self.registry, self))
+                morning_brief(self.state_mgr, self.registry, self, avail))
         except Exception as e:
             logger.exception("아침 요약 생성 실패")
             await self.notifier.send(f"⚠ 아침 요약 생성 실패: {e}")

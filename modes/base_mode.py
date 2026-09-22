@@ -62,6 +62,7 @@ class PositionState:
     eod_failures: int = 0           # EOD 연속 실패 횟수
     last_eod_date: str = ""         # 마지막으로 정산한 거래일 (중복 정산 방지)
     last_star_point: float = 0.0    # 마지막 계획의 별지점 (텔레그램 표시용)
+    next_buy_need: float = 0.0      # 다음 거래일 매수에 필요한 달러 (입금 안내용)
 
     # --- dict 스타일 읽기 (tg_bot 호환) ---
     # 기존 텔레그램 코드가 state['T'] 처럼 접근한다. 재작성 비용을 피하려고
@@ -101,6 +102,7 @@ class PositionState:
             eod_failures=int(d.get("eod_failures", 0)),
             last_eod_date=d.get("last_eod_date", ""),
             last_star_point=float(d.get("last_star_point", 0.0)),
+            next_buy_need=float(d.get("next_buy_need", 0.0)),
             reverse_first_day=bool(d.get("reverse_first_day", False)),
             reverse_start_T=float(d.get("reverse_start_T", 0.0)),
             last_close_price=float(d.get("last_close_price", 0.0)),
@@ -126,6 +128,7 @@ class PositionState:
             "eod_failures": self.eod_failures,
             "last_eod_date": self.last_eod_date,
             "last_star_point": self.last_star_point,
+            "next_buy_need": self.next_buy_need,
         }
 
 

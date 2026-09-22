@@ -875,6 +875,37 @@ class KiwoomAPIClient:
             "raw": data,
         }
 
+    async def get_buying_power(self, ticker: str, exchange: str, price: float) -> dict:
+        """미국주식 주문가능금액 (ust31490).
+
+        예수금(ust21160)은 결제 전 매도대금 등이 빠져 실제 매수 가능 금액과
+        다르다. 여기서는 **미수불가 주문가능금액(min_ord_alowa)** 을 쓴다.
+        증거금률 50% 기준 금액에는 미수(외상 매수)가 섞여 있어, 그걸 믿고
+        사면 결제일에 미수가 생기고 반대매매로 이어질 수 있다.
+
+        Args:
+            price: 매수가격. 가능수량 계산에 쓰인다.
+        """
+        body = {"stex_tp": exchange, "stk_cd": ticker, "uv": fmt_price(price)}
+        data, _ = await self.request("ust31490", self.PATH_ORDER, body)
+        return {
+            "cash_no_margin": to_float(data.get("min_ord_alowa")),   # 미수불가
+            "qty_no_margin": to_int(data.get("min_ord_alowq")),
+            "cash": to_float(data.get("ord_alowa")),                  # 주문가능현금
+            "fx_deposit": to_float(data.get("fc_entra")),             # 외화예수금
+            "raw": data,
+        }
+
+    async def available_usd(self, ticker: str, exchange: str, price: float) -> float:
+        """매수에 쓸 수 있는 달러. 주문가능금액 조회가 실패하면 D0 예수금으로 물러난다."""
+        try:
+            bp = await self.get_buying_power(ticker, exchange, price)
+            if bp["cash_no_margin"] > 0 or bp["fx_deposit"] > 0:
+                return bp["cash_no_margin"]
+        except Exception as e:
+            logger.warning("[%s] 주문가능금액 조회 실패 — D0 예수금으로 대체: %s", ticker, e)
+        return (await self.get_deposit_usd())["d0_usd"]
+
     async def get_open_orders(
         self, ticker: str = "", exchange: str = "", ord_dt: str = ""
     ) -> list[dict]:

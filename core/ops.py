@@ -228,7 +228,7 @@ async def panic_stop(kiwoom, state_mgr, registry, exchange_of) -> PanicResult:
 # 아침 요약
 # ================================================================
 
-def morning_brief(state_mgr, registry, scheduler=None) -> str:
+def morning_brief(state_mgr, registry, scheduler=None, available=None) -> str:
     """08시에 보내는 요약.
 
     EOD 리포트는 새벽 05:30 에 오는데 그때는 대개 자고 있다.
@@ -270,6 +270,14 @@ def morning_brief(state_mgr, registry, scheduler=None) -> str:
                          f"· ${s.total_pnl:,.2f}")
         except Exception:
             pass
+
+        # 오늘 입금 안내 — 매일 부족분을 채우는 운용용
+        if available is not None and t in available:
+            from core.funding import FundingCheck
+            chk = FundingCheck(need=getattr(st, "next_buy_need", 0.0),
+                               available=available[t])
+            L.append("  오늘 매수 자금")
+            L.append(chk.topup_text())
 
         if getattr(st, "halted", False):
             L.append(f"  ⚠ {st.halt_reason}")

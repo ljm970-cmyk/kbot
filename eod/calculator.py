@@ -280,6 +280,11 @@ class EndOfDayCalculator:
         # 텔레그램에서 다시 계산하려면 시세를 또 조회해야 한다.
         if result.next_plan is not None and result.next_plan.star_point:
             state.last_star_point = result.next_plan.star_point
+        # 매일 부족분을 채우는 운용에서 "오늘 얼마를 넣어야 하는지" 알리려고
+        # 다음 거래일 매수에 필요한 금액을 남긴다.
+        if result.next_plan is not None:
+            from core.funding import buy_need
+            state.next_buy_need = buy_need(result.next_plan, state.fee_rate)
         result.mode_after = state.mode
         return result
 

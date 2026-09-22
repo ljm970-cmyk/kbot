@@ -436,8 +436,23 @@ class CommandsHandler:
         self.state.save_ticker_config(user_id, ticker, cfg)
         res = self.state.apply_config(ticker)
 
+        # 수수료는 퍼센트로 보여준다. 부동소수점 그대로 찍으면
+        # 0.00070000000000000001 처럼 나온다.
+        def _fmt(v):
+            if real_key == 'fee_rate':
+                try:
+                    return f"{float(v) * 100:.3f}".rstrip("0").rstrip(".") + "%"
+                except (TypeError, ValueError):
+                    return str(v)
+            if real_key == 'principal':
+                try:
+                    return f"${float(v):,.0f}"
+                except (TypeError, ValueError):
+                    return str(v)
+            return str(v)
+
         lines = [f"✅ <b>{html.escape(ticker)}</b> 설정 변경:",
-                 f"<code>{display_name}</code>: {old} → <b>{converted}</b>"]
+                 f"<code>{display_name}</code>: {_fmt(old)} → <b>{_fmt(converted)}</b>"]
         if res.get('changed'):
             lines.append("")
             lines.append("<b>실행 상태 반영</b>")

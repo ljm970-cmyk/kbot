@@ -78,10 +78,21 @@ def test_large_avg_drift_halts():
     assert abs(80.0 - 69.75) / 69.75 >= AVG_PRICE_CRITICAL
 
 
-def test_insufficient_funds_halts():
+def test_insufficient_funds_warns_but_does_not_halt():
+    """원금을 장부상 금액으로 두고 실제 달러는 매일 채우는 운용에서
+    부족은 '아직 입금 전' 이다. 정지를 걸면 입금해도 풀리지 않아
+    그날 주문이 통째로 빠지고 매도까지 막힌다."""
     r = reconcile(_state(), _broker(), deposit_usd=100.0, required_cash=800.0)
-    assert r.should_halt is True
-    assert "예수금 부족" in r.halt_reason
+    assert r.should_halt is False
+    assert r.severity == Severity.WARNING
+    assert any(f.code == "funding_shortfall" for f in r.findings)
+    assert any("700.00" in f.message for f in r.findings)   # 입금 필요액
+
+
+def test_ledger_cash_bigger_than_deposit_is_normal():
+    """매일 채우는 방식에서는 장부 잔금이 항상 실제 예수금보다 크다"""
+    r = reconcile(_state(cash=20000.0), _broker(), deposit_usd=900.0, required_cash=500.0)
+    assert r.severity == Severity.OK
 
 
 # ================================================================

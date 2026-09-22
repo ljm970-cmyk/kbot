@@ -213,18 +213,25 @@ def reconcile(
                     f"정상이지만, 크게 벌어지면 체결 해석 오류를 의심하세요."))
 
     # --- 자금 ---
+    #
+    # 예수금 부족은 정지 사유가 아니다. 원금을 장부상 금액으로 두고
+    # 실제 달러는 매일 필요한 만큼 채우는 운용에서는, 부족은 "아직 입금
+    # 전" 이라는 일시적 상태일 뿐이다. 여기서 정지를 걸면 낮에 입금해도
+    # 풀리지 않아 그날 주문이 통째로 빠지고, 매도까지 막힌다.
+    #
+    # 부족하면 알리기만 한다. 실제 매수 여부는 주문 접수 직전에
+    # 주문가능금액을 다시 확인해서 정한다 (core/funding).
+    #
+    # 장부 잔금과 실제 예수금의 차이도 경고하지 않는다. 매일 채우는
+    # 방식에서는 장부 잔금이 항상 실제보다 크다.
     if deposit_usd is not None:
         r.deposit_usd = deposit_usd
         if required_cash > 0 and deposit_usd < required_cash:
             r.findings.append(Finding(
-                Severity.CRITICAL, "insufficient_funds",
-                f"예수금 부족 — 필요 ${required_cash:,.2f} / "
-                f"보유 ${deposit_usd:,.2f}. 주문이 거부됩니다."))
-        elif state.cash > 0 and deposit_usd < state.cash * 0.5:
-            r.findings.append(Finding(
-                Severity.WARNING, "cash_ledger_drift",
-                f"장부 잔금 ${state.cash:,.2f} 대비 실제 예수금 "
-                f"${deposit_usd:,.2f} 이 크게 적습니다."))
+                Severity.WARNING, "funding_shortfall",
+                f"다음 거래일 매수에 ${required_cash:,.2f} 필요 / 현재 "
+                f"${deposit_usd:,.2f} — ${required_cash - deposit_usd:,.2f} "
+                f"입금이 필요합니다."))
 
     return r
 

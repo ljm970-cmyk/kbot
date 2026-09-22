@@ -57,3 +57,29 @@ def buy_need(plan, fee_rate: float) -> float:
     if gross <= 0:
         return 0.0
     return round(gross * (1 + fee_rate + SAFETY_MARGIN), 2)
+
+
+def account_summary(needs: dict, available: float) -> str:
+    """여러 종목이 같은 달러를 나눠 쓸 때의 입금 안내.
+
+    종목마다 따로 비교하면 각자는 충분해 보여도 합치면 모자랄 수 있다.
+    계좌의 매수 가능 금액은 하나이므로 필요 금액을 합산해서 비교한다.
+
+    Args:
+        needs: {종목: 다음 거래일 매수 필요 금액}
+        available: 계좌의 미수불가 주문가능금액
+    """
+    active = {t: n for t, n in needs.items() if n > 0}
+    total = round(sum(active.values()), 2)
+    chk = FundingCheck(need=total, available=available)
+
+    lines = ["오늘 매수 자금"]
+    if not active:
+        lines.append("  매수 주문 없음 — 입금 불필요")
+        return "\n".join(lines)
+    if len(active) > 1:
+        for t, n in active.items():
+            lines.append(f"  {t:5} ${n:,.2f}")
+        lines.append(f"  합계  ${total:,.2f}")
+    lines.append(chk.topup_text())
+    return "\n".join(lines)

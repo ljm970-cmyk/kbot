@@ -299,16 +299,19 @@ def morning_brief(state_mgr, registry, scheduler=None, available=None) -> str:
         except Exception:
             pass
 
-        # 오늘 입금 안내 — 매일 부족분을 채우는 운용용
-        if available is not None and t in available:
-            from core.funding import FundingCheck
-            chk = FundingCheck(need=getattr(st, "next_buy_need", 0.0),
-                               available=available[t])
-            L.append("  오늘 매수 자금")
-            L.append(chk.topup_text())
-
         if getattr(st, "halted", False):
             L.append(f"  ⚠ {st.halt_reason}")
+        L.append("")
+
+    # 오늘 입금 안내 — 모든 종목이 같은 달러를 쓰므로 합산해서 비교한다
+    if available is not None:
+        from core.funding import account_summary
+        needs = {}
+        for t in tickers:
+            st = state_mgr.get_state(t)
+            if st is not None and not getattr(st, "halted", False):
+                needs[t] = getattr(st, "next_buy_need", 0.0)
+        L.append(account_summary(needs, float(available)))
         L.append("")
 
     try:

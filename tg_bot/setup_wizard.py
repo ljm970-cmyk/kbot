@@ -37,7 +37,9 @@ class SetupWizard:
     
     def get_handler(self) -> ConversationHandler:
         return ConversationHandler(
-            entry_points=[CommandHandler('start', self.cmd_start)],
+            # 관제탑의 "종목 추가" 버튼으로도 들어올 수 있다
+            entry_points=[CommandHandler('start', self.cmd_start),
+                          CallbackQueryHandler(self.cmd_start, pattern=r"^TICKER:ADD$")],
             # 각 단계의 버튼 처리기에 패턴을 건다.
             #
             # 패턴 없이 두면 마법사 대화가 끝나지 않은 채 남았을 때
@@ -46,7 +48,7 @@ class SetupWizard:
             # 재시작하기 전까지 풀리지 않는다.
             states={
                 SELECT_TICKER_MODE: [CallbackQueryHandler(
-                    self.on_ticker_mode, pattern=r"^(SINGLE:(TQQQ|SOXL)|BOTH)$")],
+                    self.on_ticker_mode, pattern=r"^(SINGLE:(TQQQ|SOXL)|BOTH|ADD_CANCEL)$")],
                 SELECT_DIVISION: [CallbackQueryHandler(
                     self.on_division, pattern=r"^(20|40)$")],
                 INPUT_PRINCIPAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_principal)],
@@ -68,17 +70,45 @@ class SetupWizard:
         context.user_data['user_id'] = user_id
         context.user_data['tickers_config'] = []
         
+        context.user_data['adding'] = False
+
+        # 버튼으로 들어온 경우(관제탑 "종목 추가") 콜백에 응답한다
+        if update.callback_query is not None:
+            await update.callback_query.answer()
+        # /start 명령과 버튼 양쪽에서 쓰도록 effective_message 를 쓴다.
+        # update.message 는 버튼 콜백에서 None 이라, 원본은 "처음부터 다시"
+        # 버튼(RESTART)에서 여기로 돌아올 때 오류가 났다.
+        msg_target = update.effective_message
+
         # 기존 설정 확인
         existing = self.state.get_user_tickers(user_id)
         if existing:
-            msg = (
+            missing = [t for t in ("TQQQ", "SOXL") if t not in existing]
+            if not missing:
+                await msg_target.reply_text(
+                    f"🤖 <b>[kbot 무한매수법]</b>\n\n"
+                    f"TQQQ·SOXL 모두 운용 중입니다.\n\n"
+                    f"/config 로 설정 수정\n/status 로 관제탑 이동",
+                    parse_mode='HTML')
+                return ConversationHandler.END
+
+            # 이미 운용 중인 종목은 건드리지 않고, 없는 종목만 추가한다.
+            # 마법사는 이번에 입력한 종목만 저장하므로 기존 설정은 그대로다.
+            context.user_data['adding'] = True
+            keyboard = [[InlineKeyboardButton(f"➕ {t} 추가", callback_data=f"SINGLE:{t}")]
+                        for t in missing]
+            keyboard.append([InlineKeyboardButton("취소", callback_data="ADD_CANCEL")])
+            await msg_target.reply_text(
                 f"🤖 <b>[kbot 무한매수법]</b>\n\n"
-                f"이미 설정된 종목: <code>{', '.join(existing)}</code>\n\n"
-                f"/config 로 설정 수정\n/status 로 관제탑 이동"
-            )
-            await update.message.reply_text(msg, parse_mode='HTML')
-            return ConversationHandler.END
-        
+                f"운용 중: <code>{', '.join(existing)}</code>\n\n"
+                f"종목을 추가하면 두 종목을 <b>동시에</b> 운용합니다.\n"
+                f"원금·분할은 종목마다 따로 정하고, 기존 종목 설정은 바뀌지 않습니다.\n\n"
+                f"<i>같은 계좌의 달러를 함께 쓰므로, 아침 요약의 입금 안내는\n"
+                f"두 종목 합계로 나옵니다.</i>",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML')
+            return SELECT_TICKER_MODE
+
         # 신규
         keyboard = [
             [InlineKeyboardButton("🇺🇸 TQQQ 단독", callback_data="SINGLE:TQQQ")],
@@ -86,7 +116,7 @@ class SetupWizard:
             [InlineKeyboardButton("💎 TQQQ + SOXL 동시", callback_data="BOTH")],
         ]
         
-        await update.message.reply_text(
+        await msg_target.reply_text(
             "🤖 <b>[kbot 무한매수법]</b>\n\n"
             "처음 오셨군요! 사이클 설정을 도와드립니다.\n\n"
             "📌 <b>운용 방식 선택</b>\n"
@@ -107,14 +137,20 @@ class SetupWizard:
         await query.answer()
         
         data = query.data
-        
+
+        if data == "ADD_CANCEL":
+            await query.edit_message_text("종목 추가를 취소했습니다.")
+            return ConversationHandler.END
+
         if data.startswith("SINGLE:"):
             ticker = data.split(":")[1]
             context.user_data['mode'] = 'single'
             context.user_data['current_ticker'] = ticker
-            
+            title = (f"{html.escape(ticker)} 추가" if context.user_data.get('adding')
+                     else f"{html.escape(ticker)} 단독 운용")
+
             await query.edit_message_text(
-                f"📌 <b>{html.escape(ticker)} 단독 운용</b>\n\n"
+                f"📌 <b>{title}</b>\n\n"
                 f"분할 수를 선택하세요:",
                 reply_markup=self._division_keyboard(),
                 parse_mode='HTML'
@@ -296,7 +332,7 @@ class SetupWizard:
                 f"├ 원금: <code>${c['principal']:,.0f}</code>\n"
                 f"├ 1회매수: <code>${one_buy:,.2f}</code>\n"
                 f"├ 수수료: <code>{c['fee_display']}%</code>\n"
-                f"└ MODE: <code>{'단독' if len(configs)==1 else '동시'}</code>\n\n"
+                f"└ MODE: <code>{'동시' if (len(configs) > 1 or context.user_data.get('adding')) else '단독'}</code>\n\n"
             )
             total += c['principal']
         
@@ -340,7 +376,8 @@ class SetupWizard:
                 "fee_rate": c['fee_rate'],
                 "fee_display": c['fee_display'],
                 "mode": "normal",
-                "run_mode": "single" if len(configs) == 1 else "both",
+                "run_mode": ("both" if (len(configs) > 1 or context.user_data.get('adding'))
+                             else "single"),
                 "is_active": True,
                 "settings": {
                     "auto_order": True,

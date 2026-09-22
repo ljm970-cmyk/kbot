@@ -592,41 +592,47 @@ class SchedulerEngine:
             logger.exception("토큰 갱신 실패")
             await self.notifier.send(f"⚠ 키움 토큰 갱신 실패: {e}")
 
-    async def _available_by_ticker(self) -> dict:
-        """종목별 매수 가능 금액. 조회 실패한 종목은 빠진다."""
-        out = {}
-        for t in self.state_mgr.list_tickers():
-            st = self.state_mgr.get_state(t)
-            if st is None:
-                continue
-            try:
-                q = await self.kiwoom.get_quote(t, exchange_of(t))
-                ref = (q["prev_close"] or q["cur_price"]) * 1.15
-                out[t] = await self.kiwoom.available_usd(t, exchange_of(t), ref)
-            except Exception as e:
-                logger.warning("[%s] 매수 가능 금액 조회 실패: %s", t, e)
-        return out
+    async def _account_available(self):
+        """계좌의 매수 가능 금액(미수불가). 조회 실패하면 None.
+
+        주문가능금액은 계좌 단위라 종목과 무관하다. 조회 API 가 종목과
+        가격을 요구해서 운용 중인 첫 종목으로 조회한다.
+        """
+        tickers = self.state_mgr.list_tickers()
+        if not tickers:
+            return None
+        t = tickers[0]
+        try:
+            q = await self.kiwoom.get_quote(t, exchange_of(t))
+            ref = (q["prev_close"] or q["cur_price"]) * 1.15
+            return await self.kiwoom.available_usd(t, exchange_of(t), ref)
+        except Exception as e:
+            logger.warning("매수 가능 금액 조회 실패: %s", e)
+            return None
 
     async def _funding_reminder(self, session=None) -> None:
-        """주문 1시간 전, 달러가 모자라면 알린다."""
-        from core.funding import FundingCheck
-        avail = await self._available_by_ticker()
+        """주문 1시간 전, 달러가 모자라면 알린다. 종목 합계로 비교한다."""
+        from core.funding import FundingCheck, account_summary
+        available = await self._account_available()
+        if available is None:
+            return
+        needs = {}
         for t in self.state_mgr.list_tickers():
             st = self.state_mgr.get_state(t)
-            if st is None or getattr(st, "halted", False) or t not in avail:
-                continue
-            chk = FundingCheck(need=st.next_buy_need, available=avail[t])
-            if not chk.ok:
-                await self.notifier.send(
-                    f"[{t}] 1시간 뒤 주문 접수 — 달러가 부족합니다.\n"
-                    f"{chk.topup_text()}\n"
-                    f"  입금하지 않으면 오늘 매수는 건너뛰고 매도만 접수합니다.")
+            if st is not None and not getattr(st, "halted", False):
+                needs[t] = st.next_buy_need
+        if FundingCheck(need=sum(needs.values()), available=available).ok:
+            return
+        await self.notifier.send(
+            "1시간 뒤 주문 접수 — 달러가 부족합니다.\n\n"
+            + account_summary(needs, available)
+            + "\n\n입금하지 않으면 모자란 만큼 매수를 건너뛰고 매도만 접수합니다.")
 
     async def _morning_brief(self) -> None:
         """아침 요약. 어제 결과와 오늘 예정을 한 번 더 알린다."""
         from core.ops import morning_brief
         try:
-            avail = await self._available_by_ticker()
+            avail = await self._account_available()
             await self.notifier.send(
                 morning_brief(self.state_mgr, self.registry, self, avail))
         except Exception as e:

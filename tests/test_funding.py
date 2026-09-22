@@ -235,7 +235,7 @@ def test_morning_brief_shows_topup():
     st = sm.get_state("SOXL")
     st.next_buy_need = 930.0
     sm.save_state(st)
-    text = morning_brief(sm, OrderRegistry(d / "o.db"), None, {"SOXL": 800.0})
+    text = morning_brief(sm, OrderRegistry(d / "o.db"), None, 800.0)
     assert "130.00 입금" in text
 
 

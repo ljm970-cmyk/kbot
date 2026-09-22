@@ -32,6 +32,9 @@ class CommandsHandler:
         self.kiwoom = kiwoom_api
         self.config = config
         self.tz = USMarketTimezone()
+        # 봇이 낸 주문과 사용자가 직접 낸 주문을 구분하려고 원장을 쓴다.
+        # 스케줄러가 만든 원장을 봇이 연결해준다 (없으면 구분 없이 표시).
+        self.registry = None
     
     # ============================================================
     # 기본 유틸리티 (기존 [4] 그대로)
@@ -203,99 +206,85 @@ class CommandsHandler:
     # TODO 완성: cmd_orders
     # ============================================================
     
+    #: 주문 태그 → 사람이 읽을 이름
+    _TAG_NAMES = {
+        "entry_buy": "처음매수", "star_buy": "별지점매수", "avg_buy": "평단매수",
+        "half_buy": "후반전매수", "merged_buy": "병합매수", "guard_buy": "대체매수",
+        "crash_buy": "폭락대비", "quarter_sell": "쿼터매도", "target_sell": "목표매도",
+        "reverse_sell": "리버스매도", "reverse_moc": "리버스MOC",
+        "reverse_quarter_buy": "쿼터매수",
+    }
+
     async def cmd_orders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """📋 주문 내역 — 실시간 미체결 + 예약주문.
+
+        원본은 예약주문(ust21205)만 조회했다. 지정가·LOC 를 프리장에 실시간
+        으로 내게 바꾼 뒤로는 미체결에 주문이 있어도 "예약주문 없음" 으로
+        나왔다. 필드명(ord_gubun, slby_gubun)도 실제 응답과 달랐다.
         """
-        📋 예약주문 내역 조회 (ust21205)
-        
-        [1] 키움 REST API:
-            POST /api/us/acnt
-            api-id: ust21205 (미국주식 예약주문내역조회)
-        """
+        from kiwoom.constants import exchange_of
+
         user_id = await self._get_user_id(update)
-        active_tickers = self.state.get_user_tickers(user_id)
-        
-        if not active_tickers:
-            await self._safe_reply(update.effective_message,
-                "❌ 설정된 종목이 없습니다.")
+        active = self.state.get_user_tickers(user_id)
+        if not active:
+            await self._safe_reply(update.effective_message, "❌ 설정된 종목이 없습니다.")
             return
-        
-        # 특정 종목 조회 또는 전체
-        target_ticker = None
+
+        targets = active
         if context.args:
-            target_ticker = context.args[0].upper()
-            if target_ticker not in active_tickers:
+            t = context.args[0].upper()
+            if t not in active:
                 await self._safe_reply(update.effective_message,
-                    f"❌ 미설정 종목: {html.escape(target_ticker)}")
+                                       f"❌ 미설정 종목: {html.escape(t)}")
                 return
-        
-        status_msg = await self._safe_reply(
-            update.effective_message,
-            "⏳ <b>[예약주문 내역]</b>\n키움 서버 조회 중...",
-            parse_mode='HTML'
-        )
-        
-        # 조회 기간: 오늘
-        today = datetime.now().strftime('%Y%m%d')
-        
-        report = f"📋 <b>[ 예약주문 내역 ]</b>\n{'━'*20}\n\n"
-        
-        tickers_to_check = [target_ticker] if target_ticker else active_tickers
-        
-        for ticker in tickers_to_check:
-            # ust21205 호출 [1]
-            orders = await self._retry_api(
-                self.kiwoom.get_reserv_orders,
-                fr_rsrv_dt=today,
-                to_rsrv_dt=today,
-                ticker=ticker,
-                default=[]
-            )
-            
-            if not orders:
-                report += f"{html.escape(ticker)}: <i>예약주문 없음</i>\n\n"
-                continue
-            
-            report += f"<b>{html.escape(ticker)}</b> ({len(orders)}건)\n"
-            
-            for i, o in enumerate(orders, 1):
-                # 주문 상태
-                ord_stat = o.get('ord_stat', '01')
-                status_icon = "🟢" if ord_stat == '01' else "🟡" if ord_stat == '02' else "🔴"
-                
-                # 주문 유형
-                gubun = o.get('ord_gubun', '30')
-                gubun_map = {
-                    '30': ('LOC', '🔵'),
-                    '32': ('MOC', '🟠'),
-                    '00': ('지정가', '🟣'),
-                }
-                type_name, type_icon = gubun_map.get(gubun, (gubun, '⚪'))
-                
-                # 매수/매도
-                slby = "매수" if o.get('slby_gubun') == '2' else "매도"
-                
-                # 가격
-                price = o.get('ord_uv', '시장가')
-                
-                report += (
-                    f"├ {status_icon} <code>{o.get('rsrv_ord_no', 'N/A')}</code> | "
-                    f"{type_icon}{type_name}{slby[-1]} | "
-                    f"{price} | {o.get('ord_qty', '0')}주 | "
-                    f"{'실행대기' if ord_stat == '01' else '처리중'}\n"
-                )
-            
-            report += "\n"
-        
-        # 버튼
-        keyboard = [
-            [InlineKeyboardButton("❌ 주문취소", callback_data="ORDER:CANCEL"),
-             InlineKeyboardButton("🗑️ 일괄취소", callback_data="ORDER:CANCEL_ALL")],
-            [InlineKeyboardButton("🔄 새로고침", callback_data="ORDERS:REFRESH")],
-        ]
-        
-        await self._safe_edit(status_msg, report,
-            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
-    
+            targets = [t]
+
+        L = ["📋 <b>[ 주문 내역 ]</b>", ""]
+        for t in targets:
+            ex = exchange_of(t)
+            live = await self._retry_api(self.kiwoom.get_open_orders, t, ex, default=None)
+            rsv = await self._retry_api(self.kiwoom.get_reserved_orders,
+                                        ticker=t, exchange=ex, default=None)
+
+            ours_live, ours_rsv = {}, {}
+            if self.registry is not None:
+                ours_live = self.registry.bot_live_orders(t)
+                ours_rsv = self.registry.bot_reserved_orders(t)
+
+            # ── 실시간 미체결 ──
+            if live is None:
+                L.append(f"<b>{t}</b> 미체결 — 조회 실패")
+            else:
+                L.append(f"<b>{t}</b> 미체결 {len(live)}건")
+                for o in sorted(live, key=lambda x: -(x.get("ord_uv") or 0)):
+                    rec = ours_live.get(str(o.get("ord_no")))
+                    who = "🤖" if rec else "👤"
+                    name = self._TAG_NAMES.get(rec.tag, rec.tag) if rec else "직접 주문"
+                    side = "매수" if o.get("side") == "buy" else "매도"
+                    qty = int(o.get("remain_qty") or o.get("ord_qty") or 0)
+                    L.append(f"  {who} {side} {o.get('trade_type_nm', '')} "
+                             f"{qty}주 @{float(o.get('ord_uv') or 0):.2f}  {name}")
+                if not live:
+                    L.append("  <i>없음</i>")
+
+            # ── 예약주문 (MOC 등) ──
+            if rsv:
+                L.append(f"<b>{t}</b> 예약주문 {len(rsv)}건")
+                for o in rsv:
+                    rec = ours_rsv.get(str(o.get("rsrv_ord_no")))
+                    who = "🤖" if rec else "👤"
+                    L.append(f"  {who} {o.get('slby_tp', '')} {o.get('trde_nm', '')} "
+                             f"{int(o.get('ord_qty') or 0)}주 @{o.get('ord_uv', '')}  "
+                             f"{o.get('proc_tp', '')}")
+            L.append("")
+
+        L.append("🤖 봇 주문  👤 직접 주문")
+        keyboard = [[InlineKeyboardButton("🔄 새로고침", callback_data="ORDERS:REFRESH"),
+                     InlineKeyboardButton("🚨 긴급정지", callback_data="ORDER:CANCEL_ALL")]]
+        await self._safe_reply(update.effective_message, "\n".join(L),
+                               parse_mode='HTML',
+                               reply_markup=InlineKeyboardMarkup(keyboard))
+
     # ============================================================
     # TODO 완성: cmd_config
     # ============================================================

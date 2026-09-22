@@ -256,6 +256,12 @@ class SchedulerEngine:
         if plan.warnings and window == SubmitWindow.PRE_MARKET:
             await self.notifier.send(f"[{ticker}] " + "\n".join(plan.warnings))
 
+        # 증권사 앱에서 직접 취소한 LOC 를 원장에 반영한다.
+        # 반영하지 않으면 원장엔 "접수됨" 으로 남아, 다시 낼 때 아래 중복
+        # 방지가 막는다.
+        if not self.config.dry_run:
+            await self._sync_cancelled_loc(ticker, trade_date)
+
         # 중복 접수 방지 — 같은 날 같은 주문을 두 번 내면 포지션이 두 배가 된다.
         #
         # 창구 단위가 아니라 주문 단위로 걸러낸다. 자금 부족으로 매수만
@@ -408,14 +414,51 @@ class SchedulerEngine:
                 await self.notifier.send(f"⚠ [{ticker}] 예약주문 검증 실패: {e}")
                 continue
 
+            # 봇 원장에서 아직 살아 있다고 보는 예약만 알린다.
+            # 이미 취소·만료로 기록한 예약이나 사용자가 직접 건 예약은 뺀다.
+            ours = self.registry.bot_reserved_orders(ticker)
+            bad = [b for b in bad if str(b.get("rsrv_ord_no")) in ours]
+
             if bad:
                 lines = [f"⚠ [{ticker}] 예약주문 {len(bad)}건 거부"]
                 for b in bad:
                     self.registry.mark_rejected_by_rsrv_no(b["rsrv_ord_no"], b["reason"])
-                    lines.append(f"  {b['ord_qty']}주 @{b['ord_uv']:.2f} — {b['reason']}")
+                    lines.append(f"  {b['ord_qty']}주 @{b['ord_uv']:.2f} — "
+                                 f"{b['reason'] or b.get('proc_tp') or '사유 미상'}")
                 await self.notifier.send("\n".join(lines))
 
             await self._verify_live(ticker)
+
+    async def _sync_cancelled_loc(self, ticker: str, trade_date: str) -> int:
+        """원장엔 접수됨인데 증권사 미체결에 없는 LOC 를 취소로 표시한다.
+
+        LOC 는 종가에만 체결되므로 장중에 미체결에서 사라졌다면 취소된 것이
+        확실하다. 지정가는 장중 체결일 수 있어 건드리지 않는다.
+
+        미체결 조회가 실패하면 아무것도 바꾸지 않는다. 확인 없이 취소로
+        표시하면 살아 있는 주문을 한 번 더 내게 된다.
+        """
+        recs = [r for r in self.registry.day_orders(trade_date, ticker)
+                if r.status in ("submitted", "partial") and r.ord_no
+                and not r.rsrv_ord_no and r.trade_type == TradeType.LOC]
+        if not recs:
+            return 0
+        try:
+            live = {str(o["ord_no"]) for o in
+                    await self.kiwoom.get_open_orders(ticker, exchange_of(ticker))}
+        except Exception as e:
+            logger.warning("[%s] 미체결 조회 실패 — 취소 반영 생략: %s", ticker, e)
+            return 0
+
+        gone = [r for r in recs if r.ord_no not in live]
+        for r in gone:
+            self.registry.set_status(r.id, "cancelled", "증권사 미체결에서 사라짐 (직접 취소)")
+        if gone:
+            logger.info("[%s] 직접 취소된 LOC %d건 원장 반영", ticker, len(gone))
+            await self.notifier.send(
+                f"[{ticker}] 앱에서 취소된 LOC {len(gone)}건을 확인했습니다. "
+                f"다시 접수합니다.")
+        return len(gone)
 
     async def _verify_live(self, ticker: str) -> None:
         """봇이 낸 실시간 주문이 미체결에 살아 있는지 확인한다.

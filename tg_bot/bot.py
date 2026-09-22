@@ -99,6 +99,8 @@ class KbotTelegramBot:
         
         # 핸들러 초기화 (실제 객체 주입)
         self.cmd_handler = CommandsHandler(state_manager, kiwoom_api, config)
+        # 주문 내역에서 봇 주문과 직접 주문을 구분하려면 원장이 필요하다
+        self.cmd_handler.registry = getattr(scheduler, "registry", None)
         self.setup_wizard = SetupWizard(state_manager)
         
         # Application 빌드

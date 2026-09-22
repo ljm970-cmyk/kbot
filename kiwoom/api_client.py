@@ -802,10 +802,15 @@ class KiwoomAPIClient:
             #
             # "미취소" 에 "취소" 가 들어 있어 부분 문자열로 판정하면
             # 정상 주문을 매일 거부로 신고한다. 부정형을 먼저 걸러낸다.
-            is_error = "에러" in proc or proc == "9"
-            is_dead = (not cancelled.startswith("미")
-                       and ("취소" in cancelled or "무효" in cancelled))
-            if is_error or is_dead:
+            #
+            # "취소" 는 거부가 아니다. 봇이나 사용자가 거둔 예약이다.
+            # 이걸 거부로 보면, /panic 으로 거둔 예약이 그날 밤 "거부" 로
+            # 다시 신고된다 (실측 2026-09-22 22:40, 사유 칸이 모두 빈 채로).
+            # 진짜 거부는 처리 에러가 났거나 증권사가 무효 처리한 경우다.
+            err_text = str(_pick(r, "err_cntn") or "").strip()
+            is_error = "에러" in proc or proc == "9" or bool(err_text)
+            is_void = not cancelled.startswith("미") and "무효" in cancelled
+            if is_error or is_void:
                 bad.append({
                     "rsrv_ord_no": _pick(r, "rsrv_ord_no"),
                     "stk_cd": _pick(r, "stk_cd"),

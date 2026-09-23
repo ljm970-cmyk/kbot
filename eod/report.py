@@ -19,6 +19,7 @@ from typing import Optional
 
 from core.order_registry import OrderRegistry
 from core.reconciler import CircuitBreaker, derive_t
+from core.star_point import star_pct
 
 #: 이력에 보여줄 최근 일수
 HISTORY_DAYS = 30
@@ -89,13 +90,42 @@ def crosscheck_block(state) -> str:
     return "🔎 교차검증\n" + line
 
 
-def next_plan_block(plan) -> str:
+def star_line(state, plan) -> str:
+    """별지점 한 줄. 평단 대비 몇 %인지 같이 보여준다.
+
+    별%는 T에 따라 매일 움직인다(예: SOXL 40분할은 20-T). 가격만 보면
+    지금 어느 국면인지 알 수 없어서 %를 함께 적는다.
+    리버스 별지점은 직전 5거래일 종가 평균이라 평단과 무관하다.
+    """
+    if plan is None or plan.star_point is None:
+        return ""
+    if state.mode == "reverse":
+        return f"  ⭐ 별지점 {plan.star_point:.2f} (직전 5거래일 종가 평균)"
+    try:
+        pct = star_pct(state.ticker, state.division, state.T)
+    except ValueError:
+        return f"  ⭐ 별지점 {plan.star_point:.2f}"
+    return (f"  ⭐ 별지점 {plan.star_point:.2f} "
+            f"(평단 {pct:+.2f}% · 별% = {_star_formula(state)})")
+
+
+def _star_formula(state) -> str:
+    """별% 산식을 사람이 읽을 형태로 (예: 20 - T)"""
+    base, coef = (20, 2) if state.ticker.upper() == "SOXL" else (15, 1.5)
+    if state.division == 40:
+        coef /= 2
+    coef_txt = "T" if coef == 1 else f"{coef:g}T"
+    return f"{base} - {coef_txt}"
+
+
+def next_plan_block(plan, state=None) -> str:
     """다음 거래일 주문 계획"""
     if plan is None or not plan.orders:
         return "다음 거래일 주문 없음"
     lines = [f"📋 다음 거래일 계획 (1회매수액 {_fmt_money(plan.unit_amount)})"]
     if plan.star_point is not None:
-        lines.append(f"  ⭐ 별지점 {plan.star_point:.2f}")
+        line = star_line(state, plan) if state is not None else None
+        lines.append(line or f"  ⭐ 별지점 {plan.star_point:.2f}")
     for o in plan.orders:
         price = f"{o.price:.2f}" if o.price is not None else "MKT"
         side = "🔴 매수" if o.side == "buy" else "🔵 매도"
@@ -157,7 +187,7 @@ def daily_report(
             today.append("  🏁 사이클 종료")
         blocks.append("\n".join(today))
 
-        blocks.append(next_plan_block(eod_result.next_plan))
+        blocks.append(next_plan_block(eod_result.next_plan, state))
 
         alerts = list(eod_result.anomalies)
         alerts += [f"매칭 실패: {f.side} {f.qty}주 @{f.price:.2f}"

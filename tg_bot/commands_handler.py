@@ -151,11 +151,18 @@ class CommandsHandler:
             # 리버스 종목이 있을 때 /status 전체가 실패한다.
             if st['avg_price'] > 0:
                 if st['mode'] == 'normal':
+                    from core.star_point import star_pct
                     star = StarPointCalculator(ticker, st['division'], 'normal')
                     sc = star.calculate(st['avg_price'], st['T'])
+                    try:
+                        pct = star_pct(ticker, st['division'], st['T'])
+                        pct_txt = f" <code>({pct:+.2f}%)</code>"
+                    except ValueError:
+                        pct_txt = ""
                     report += (
-                        f"├ ⭐ 별지점: <code>${sc.star_point:.2f}</code> "
-                        f"(매수: <code>${sc.buy_price:.2f}</code>)\n"
+                        f"├ ⭐ 별지점: <code>${sc.star_point:.2f}</code>{pct_txt}\n"
+                        f"├ 　 매수 <code>${sc.buy_price:.2f}</code> · "
+                        f"매도 <code>${sc.sell_price:.2f}</code>\n"
                     )
                 else:
                     star_pct = StarPointCalculator.STAR_PCT_REVERSE[ticker]

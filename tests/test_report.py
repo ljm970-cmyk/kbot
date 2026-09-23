@@ -175,6 +175,67 @@ def test_scheduler_uses_daily_report():
 
 
 # ================================================================
+# 별% 표시
+#
+# 별%는 T에 따라 매일 움직인다. 가격만 보면 지금 어느 국면인지
+# 알 수 없어서 평단 대비 %와 산식을 함께 보여준다.
+# ================================================================
+
+def _plan_with_star(star=180.82):
+    class P:
+        star_point = star
+    return P()
+
+
+def test_star_line_shows_percent_and_formula():
+    from eod.report import star_line
+    st = PositionState(ticker="SOXL", division=40, principal=20000.0,
+                       fee_rate=0.0007, T=1.0, avg_price=151.95)
+    line = star_line(st, _plan_with_star())
+    assert "180.82" in line
+    assert "+19.00%" in line
+    assert "20 - T" in line
+
+
+def test_star_formula_per_combination():
+    from eod.report import _star_formula
+    def _st(tk, div):
+        return PositionState(ticker=tk, division=div, principal=20000.0,
+                             fee_rate=0.0007)
+    assert _star_formula(_st("SOXL", 20)) == "20 - 2T"
+    assert _star_formula(_st("SOXL", 40)) == "20 - T"
+    assert _star_formula(_st("TQQQ", 20)) == "15 - 1.5T"
+    assert _star_formula(_st("TQQQ", 40)) == "15 - 0.75T"
+
+
+def test_star_percent_turns_negative_late_in_cycle():
+    """T가 커지면 별지점이 평단 아래로 내려간다"""
+    from eod.report import star_line
+    st = PositionState(ticker="SOXL", division=40, principal=20000.0,
+                       fee_rate=0.0007, T=30.0, avg_price=100.0)
+    assert "-10.00%" in star_line(st, _plan_with_star(90.0))
+
+
+def test_reverse_star_has_no_percent():
+    """리버스 별지점은 직전 5거래일 종가 평균이라 평단과 무관하다"""
+    from eod.report import star_line
+    st = PositionState(ticker="SOXL", division=40, principal=20000.0,
+                       fee_rate=0.0007, T=39.0, avg_price=100.0, mode="reverse")
+    line = star_line(st, _plan_with_star(88.0))
+    assert "5거래일" in line
+    assert "%" not in line
+
+
+def test_status_screen_shows_star_percent():
+    root = Path(__file__).resolve().parent.parent
+    src = (root / "tg_bot" / "commands_handler.py").read_text(encoding="utf-8")
+    block = src[src.index("# 별지점"):]
+    block = block[:block.index("다음주문")]
+    assert "star_pct" in block
+    assert "매도" in block          # 별지점 매수가·매도가 둘 다
+
+
+# ================================================================
 
 if __name__ == "__main__":
     failed = 0

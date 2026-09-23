@@ -260,9 +260,12 @@ class CommandsHandler:
                     rec = ours_live.get(str(o.get("ord_no")))
                     who = "🤖" if rec else "👤"
                     name = self._TAG_NAMES.get(rec.tag, rec.tag) if rec else "직접 주문"
-                    side = "매수" if o.get("side") == "buy" else "매도"
+                    side = "🔴매수" if o.get("side") == "buy" else "🔵매도"
                     qty = int(o.get("remain_qty") or o.get("ord_qty") or 0)
-                    L.append(f"  {who} {side} {o.get('trade_type_nm', '')} "
+                    kind = str(o.get("trade_type_nm", ""))
+                    kind = "LOC" if "On Close" in kind and "Limit" in kind else \
+                           "MOC" if "On Close" in kind else kind
+                    L.append(f"  {who} {side} {kind} "
                              f"{qty}주 @{float(o.get('ord_uv') or 0):.2f}  {name}")
                 if not live:
                     L.append("  <i>없음</i>")

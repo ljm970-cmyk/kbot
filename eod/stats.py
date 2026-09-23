@@ -161,21 +161,21 @@ def format_stats(stats: Stats, recent: int = 5) -> str:
     if not stats.closed and stats.open_cycle is None:
         return f"[{stats.ticker}] 아직 집계할 이력이 없습니다."
 
-    L = [f"[{stats.ticker}] 누적 성과", ""]
+    L = [f"🏆 [{stats.ticker}] 누적 성과", ""]
     if stats.closed:
         L += [
-            f"  완료 사이클  {stats.closed}회 (승 {stats.wins} / 패 {stats.closed - stats.wins})",
-            f"  승률         {stats.win_rate:.0f}%",
-            f"  누적 손익    ${stats.total_pnl:,.2f}",
-            f"  평균 소요    {stats.avg_days:.1f}거래일",
+            f"  🔁 완료 사이클  {stats.closed}회 (승 {stats.wins} / 패 {stats.closed - stats.wins})",
+            f"  🎯 승률         {stats.win_rate:.0f}%",
+            f"  💰 누적 손익    ${stats.total_pnl:,.2f}",
+            f"  ⏳ 평균 소요    {stats.avg_days:.1f}거래일",
         ]
         if stats.best:
-            L.append(f"  최고         #{stats.best.index} ${stats.best.pnl:+,.2f} "
+            L.append(f"  🥇 최고         #{stats.best.index} ${stats.best.pnl:+,.2f} "
                      f"({stats.best.pnl_pct:+.2f}%)")
         if stats.worst:
-            L.append(f"  최저         #{stats.worst.index} ${stats.worst.pnl:+,.2f} "
+            L.append(f"  🥶 최저         #{stats.worst.index} ${stats.worst.pnl:+,.2f} "
                      f"({stats.worst.pnl_pct:+.2f}%)")
-    L.append(f"  운용 일수    {stats.total_days}거래일 "
+    L.append(f"  📅 운용 일수    {stats.total_days}거래일 "
              f"(리버스 {stats.reverse_days}일)")
 
     if stats.cycles:
@@ -188,7 +188,7 @@ def format_stats(stats: Stats, recent: int = 5) -> str:
 
     if stats.open_cycle:
         c = stats.open_cycle
-        L += ["", f"  진행 중 #{c.index}  {c.start_date[4:]}~  {c.days}거래일",
+        L += ["", f"  ▶️ 진행 중 #{c.index}  {c.start_date[4:]}~  {c.days}거래일",
               f"    최대T {c.max_T:.2f} · 최대보유 {c.max_holdings}주"
               + (f" · 리버스 {c.reverse_days}일" if c.reverse_days else "")]
 

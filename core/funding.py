@@ -39,11 +39,11 @@ class FundingCheck:
     def topup_text(self) -> str:
         """입금 안내 한 줄"""
         if self.need <= 0:
-            return "  매수 주문 없음 — 입금 불필요"
+            return "  ✅ 매수 주문 없음 — 입금 불필요"
         if self.ok:
-            return (f"  필요 ${self.need:,.2f} / 가능 ${self.available:,.2f} — 충분")
+            return (f"  필요 ${self.need:,.2f} / 가능 ${self.available:,.2f} — ✅ 충분")
         return (f"  필요 ${self.need:,.2f} / 가능 ${self.available:,.2f}\n"
-                f"  → ${self.shortfall:,.2f} 입금이 필요합니다")
+                f"  ⚠️ ${self.shortfall:,.2f} 입금이 필요합니다")
 
 
 def buy_need(plan, fee_rate: float) -> float:
@@ -73,9 +73,9 @@ def account_summary(needs: dict, available: float) -> str:
     total = round(sum(active.values()), 2)
     chk = FundingCheck(need=total, available=available)
 
-    lines = ["오늘 매수 자금"]
+    lines = ["💰 오늘 매수 자금"]
     if not active:
-        lines.append("  매수 주문 없음 — 입금 불필요")
+        lines.append("  ✅ 매수 주문 없음 — 입금 불필요")
         return "\n".join(lines)
     if len(active) > 1:
         for t, n in active.items():

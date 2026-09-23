@@ -74,7 +74,7 @@ class Finding:
     message: str
 
     def __str__(self) -> str:
-        mark = {"critical": "✗", "warning": "!", "ok": "·"}.get(self.severity, "?")
+        mark = {"critical": "✗", "warning": "⚠️", "ok": "·"}.get(self.severity, "?")
         return f"{mark} {self.message}"
 
 
@@ -123,13 +123,13 @@ class ReconcileResult:
 
     def report(self) -> str:
         if self.corrections and not self.findings:
-            lines = [f"[{self.ticker}] 장부 자동 교정"]
+            lines = [f"🔧 [{self.ticker}] 장부 자동 교정"]
             lines += [f"  · {c}" for c in self.corrections]
             return "\n".join(lines)
         if not self.findings:
-            return f"[{self.ticker}] 장부 일치"
-        head = {"critical": "장부 불일치 — 주문 정지",
-                "warning": "장부 확인 필요"}.get(self.severity, "장부 점검")
+            return f"✅ [{self.ticker}] 장부 일치"
+        head = {"critical": "⛔ 장부 불일치 — 주문 정지",
+                "warning": "⚠️ 장부 확인 필요"}.get(self.severity, "🔎 장부 점검")
         lines = [f"[{self.ticker}] {head}"]
         lines += [f"  {f}" for f in self.findings]
         if self.corrections:
@@ -385,7 +385,7 @@ class CircuitBreaker:
     def status_line(state) -> str:
         if not CircuitBreaker.is_halted(state):
             return ""
-        return (f"주문 정지 중 ({getattr(state, 'halted_at', '')})\n"
+        return (f"⛔ 주문 정지 중 ({getattr(state, 'halted_at', '')})\n"
                 f"  사유: {getattr(state, 'halt_reason', '')}\n"
                 f"  확인 후 /unhalt {state.ticker} 로 해제하세요.")
 

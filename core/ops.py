@@ -73,28 +73,28 @@ def health_report(config, kiwoom, state_mgr, scheduler=None, ws=None) -> str:
     if config.dry_run:
         mode += " · DRY RUN(주문 미전송)"
 
-    L = [f"kbot 상태 — {mode}", "", f"  가동    {uptime_text()}"]
+    L = [f"🩺 kbot 상태 — {mode}", "", f"  ⏱ 가동    {uptime_text()}"]
 
     # 토큰
     exp = getattr(kiwoom, "token_expiry", None)
     if exp:
         left = int((exp - datetime.now()).total_seconds())
         if left > 0:
-            L.append(f"  토큰    {exp:%m/%d %H:%M} 만료 "
+            L.append(f"  🔑 토큰    {exp:%m/%d %H:%M} 만료 "
                      f"(남은 {left // 3600}시간 {(left % 3600) // 60}분)")
         else:
-            L.append(f"  토큰    만료됨 — 다음 요청 시 갱신")
+            L.append(f"  🔑 토큰    만료됨 — 다음 요청 시 갱신")
     else:
-        L.append("  토큰    미발급")
+        L.append("  🔑 토큰    미발급")
 
     # WebSocket
     if ws is not None:
         try:
-            L.append(f"  체결수신 {ws.health()}")
+            L.append(f"  📡 체결수신 {ws.health()}")
         except Exception as e:
-            L.append(f"  체결수신 확인 실패 ({e})")
+            L.append(f"  📡 체결수신 확인 실패 ({e})")
     else:
-        L.append("  체결수신 미연결")
+        L.append("  📡 체결수신 미연결")
 
     # 다음 작업
     if scheduler is not None:
@@ -105,26 +105,28 @@ def health_report(config, kiwoom, state_mgr, scheduler=None, ws=None) -> str:
                 nxt.append((t, job.id))
         if nxt:
             t, jid = min(nxt)
-            L.append(f"  다음작업 {jid} {t:%m/%d %H:%M}")
+            L.append(f"  ⏰ 다음작업 {jid} {t:%m/%d %H:%M}")
         else:
-            L.append("  다음작업 없음")
+            L.append("  ⏰ 다음작업 없음")
 
     # 종목별
     L.append("")
     tickers = state_mgr.list_tickers()
     if not tickers:
-        L.append("  설정된 종목 없음")
+        L.append("  ⚪ 설정된 종목 없음")
     for t in tickers:
         st = state_mgr.get_state(t)
         if st is None:
             continue
-        flag = " [정지]" if getattr(st, "halted", False) else ""
-        L.append(f"  [{t}]{flag} {st.mode} T={st.T:.4f} "
+        halted = getattr(st, "halted", False)
+        mark = "⛔" if halted else "🟩"
+        flag = " [정지]" if halted else ""
+        L.append(f"  {mark} [{t}]{flag} {st.mode} T={st.T:.4f} "
                  f"{st.holdings}주 잔금 ${st.cash:,.2f}")
         last = getattr(st, "last_eod_date", "")
-        L.append(f"     마지막 정산 {last or '없음'}")
-        if getattr(st, "halted", False):
-            L.append(f"     사유: {st.halt_reason}")
+        L.append(f"     🧾 마지막 정산 {last or '없음'}")
+        if halted:
+            L.append(f"     ⚠️ 사유: {st.halt_reason}")
 
     return "\n".join(L)
 
@@ -142,23 +144,23 @@ class PanicResult:
     cancel_window_closed: bool = False
 
     def report(self) -> str:
-        L = ["긴급 정지 실행"]
-        L.append(f"  주문 정지  {', '.join(self.halted) or '없음'}")
+        L = ["🚨 긴급 정지 실행"]
+        L.append(f"  ⛔ 주문 정지  {', '.join(self.halted) or '없음'}")
 
         if self.cancelled:
-            L.append(f"  취소 완료  {len(self.cancelled)}건")
+            L.append(f"  🗑 취소 완료  {len(self.cancelled)}건")
             for c in self.cancelled[:10]:
                 L.append(f"    {c}")
         else:
-            L.append("  취소 완료  없음")
+            L.append("  🗑 취소 완료  없음")
 
         if self.failed:
-            L.append(f"  취소 실패  {len(self.failed)}건")
+            L.append(f"  ⚠️ 취소 실패  {len(self.failed)}건")
             for no, why in self.failed[:10]:
                 L.append(f"    {no} — {why}")
 
         if self.skipped_not_ours:
-            L.append(f"  건드리지 않음 {self.skipped_not_ours}건 "
+            L.append(f"  👤 건드리지 않음 {self.skipped_not_ours}건 "
                      f"(봇이 낸 주문이 아님)")
 
         if self.cancel_window_closed:
@@ -167,7 +169,7 @@ class PanicResult:
             L.append("    아닙니다. 급하면 증권사 앱에서 직접 취소하세요.")
 
         L.append("")
-        L.append("  신규 주문은 멈췄습니다. /unhalt <종목> 으로 해제합니다.")
+        L.append("  ⛔ 신규 주문은 멈췄습니다. /unhalt <종목> 으로 해제합니다.")
         return "\n".join(L)
 
 
@@ -265,7 +267,7 @@ def morning_brief(state_mgr, registry, scheduler=None, available=None) -> str:
     from core.market_calendar import DaySchedule, upcoming_session
     from eod.stats import collect
 
-    L = [f"아침 요약 — {datetime.now(KST):%m/%d (%a)}", ""]
+    L = [f"☀️ 아침 요약 — {datetime.now(KST):%m/%d (%a)}", ""]
 
     tickers = state_mgr.list_tickers()
     if not tickers:
@@ -275,10 +277,11 @@ def morning_brief(state_mgr, registry, scheduler=None, available=None) -> str:
         st = state_mgr.get_state(t)
         if st is None:
             continue
-        flag = " [정지]" if getattr(st, "halted", False) else ""
-        L.append(f"[{t}]{flag}")
-        L.append(f"  T {st.T:.4f} · {st.holdings}주 @${st.avg_price:.2f} "
-                 f"· 잔금 ${st.cash:,.2f}")
+        halted = getattr(st, "halted", False)
+        flag = " [정지]" if halted else ""
+        L.append(f"{'⛔' if halted else '💎'} [{t}]{flag}")
+        L.append(f"  📈 T {st.T:.4f} · {st.holdings}주 @${st.avg_price:.2f} "
+                 f"· 💵 잔금 ${st.cash:,.2f}")
 
         last = getattr(st, "last_eod_date", "")
         if last:
@@ -286,21 +289,22 @@ def morning_brief(state_mgr, registry, scheduler=None, available=None) -> str:
             same = [r for r in rows if r["date"] == last]
             if same:
                 for r in same:
+                    mark = "🔴" if r["side"] == "buy" else "🔵"
                     side = "매수" if r["side"] == "buy" else "매도"
-                    L.append(f"  어제 {side} {r['qty']}주 @${r['avg_price']:.2f}")
+                    L.append(f"  {mark} 어제 {side} {r['qty']}주 @${r['avg_price']:.2f}")
             else:
-                L.append("  어제 체결 없음")
+                L.append("  ⚪ 어제 체결 없음")
 
         try:
             s = collect(state_mgr, t)
             if s.closed:
-                L.append(f"  누적 {s.closed}사이클 · 승률 {s.win_rate:.0f}% "
+                L.append(f"  🏆 누적 {s.closed}사이클 · 승률 {s.win_rate:.0f}% "
                          f"· ${s.total_pnl:,.2f}")
         except Exception:
             pass
 
         if getattr(st, "halted", False):
-            L.append(f"  ⚠ {st.halt_reason}")
+            L.append(f"  ⚠️ {st.halt_reason}")
         L.append("")
 
     # 오늘 입금 안내 — 모든 종목이 같은 달러를 쓰므로 합산해서 비교한다

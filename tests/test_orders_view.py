@@ -137,6 +137,7 @@ def test_orders_shows_realtime_open_orders():
     assert "미체결 1건" in text
     assert "163.11" in text
     assert "처음매수" in text
+    assert "LOC" in text          # "Limit On Close" 는 휴대폰에서 줄이 꺾인다
 
 
 def test_orders_distinguishes_bot_and_personal():
@@ -149,8 +150,8 @@ def test_orders_distinguishes_bot_and_personal():
     h, sent = _handler(sm, reg, live)
     asyncio.run(h.cmd_orders(_U(), _C()))
     text = sent[0]
-    assert "🤖 매수" in text and "폭락대비" in text
-    assert "👤 매도" in text and "직접 주문" in text
+    assert "🤖 🔴매수" in text and "폭락대비" in text
+    assert "👤 🔵매도" in text and "직접 주문" in text
 
 
 def test_orders_empty():

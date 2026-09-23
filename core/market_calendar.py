@@ -287,11 +287,11 @@ class DaySchedule:
     def describe(self) -> str:
         tag = " · 조기폐장" if self.early_close else ""
         return (f"{self.session} 일정{tag}\n"
-                f"  지정가매도 {self.premarket:%m/%d %H:%M}\n"
-                f"  LOC 접수   {self.submit_loc:%m/%d %H:%M}\n"
-                f"  주문 검증  {self.verify:%m/%d %H:%M}\n"
-                f"  개장 검증  {self.verify_open:%m/%d %H:%M}\n"
-                f"  EOD 정산   {self.eod:%m/%d %H:%M}")
+                f"  🔵 지정가매도 {self.premarket:%m/%d %H:%M}\n"
+                f"  🔴 LOC 접수   {self.submit_loc:%m/%d %H:%M}\n"
+                f"  🔎 주문 검증  {self.verify:%m/%d %H:%M}\n"
+                f"  🔎 개장 검증  {self.verify_open:%m/%d %H:%M}\n"
+                f"  🧾 EOD 정산   {self.eod:%m/%d %H:%M}")
 
 
 def describe(d: Optional[date] = None) -> str:

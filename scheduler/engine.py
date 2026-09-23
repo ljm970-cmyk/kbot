@@ -239,7 +239,7 @@ class SchedulerEngine:
                            ticker, label, state.halt_reason)
             if window == SubmitWindow.PRE_MARKET:
                 await self.notifier.send(
-                    f"[{ticker}] 주문 정지 중이라 접수하지 않았습니다.\n"
+                    f"⛔ [{ticker}] 주문 정지 중이라 접수하지 않았습니다.\n"
                     f"  사유: {state.halt_reason}\n"
                     f"  확인 후 /unhalt {ticker} 로 해제하세요."
                 )
@@ -276,7 +276,7 @@ class SchedulerEngine:
                         ticker, label, len(skipped), ", ".join(sorted(dup)))
             if not orders:
                 await self.notifier.send(
-                    f"[{ticker}] {label} 는 모두 이미 접수돼 있어 건너뛰었습니다.")
+                    f"ℹ️ [{ticker}] {label} 는 모두 이미 접수돼 있어 건너뛰었습니다.")
                 return
 
         # 자금 점검 — 매수만 해당. 매도는 돈이 없어도 낸다.
@@ -298,7 +298,7 @@ class SchedulerEngine:
                 if not chk.ok:
                     orders = [o for o in orders if o.side != "buy"]
                     await self.notifier.send(
-                        f"[{ticker}] 달러가 부족해 오늘 매수를 건너뜁니다.\n"
+                        f"💸 [{ticker}] 달러가 부족해 오늘 매수를 건너뜁니다.\n"
                         f"{chk.topup_text()}\n\n"
                         + ("  매도 주문은 그대로 접수합니다.\n" if orders else "")
                         + f"  입금한 뒤 /run loc 로 매수만 다시 접수할 수 있습니다\n"
@@ -341,18 +341,18 @@ class SchedulerEngine:
                 return
             except KiwoomAPIError as e:
                 self.registry.set_status(record_id, "rejected", str(e))
-                await self.notifier.send(f"⚠ [{ticker}] {order} 접수 거부: {e.message}")
+                await self.notifier.send(f"⛔ [{ticker}] {order} 접수 거부: {e.message}")
             except Exception as e:
                 # 전송 자체가 안 된 경우(값 검증 실패 등). 원장에 '접수됨' 으로
                 # 남겨두면 나가지도 않은 주문이 다른 체결을 가로챈다.
                 logger.exception("[%s] 주문 전송 실패", ticker)
                 self.registry.set_status(record_id, "rejected", f"전송 실패: {e}")
-                await self.notifier.send(f"⚠ [{ticker}] {order} 전송 실패: {e}")
+                await self.notifier.send(f"⚠️ [{ticker}] {order} 전송 실패: {e}")
 
         logger.info("[%s] %s %d/%d건 접수", ticker, label, submitted, len(orders))
         if submitted == 0 and orders:
             await self.notifier.send(
-                f"⚠ [{ticker}] {label} {len(orders)}건이 모두 실패했습니다. "
+                f"⚠️ [{ticker}] {label} {len(orders)}건이 모두 실패했습니다. "
                 f"증권사 앱에서 주문 상태를 확인하세요.")
 
     @staticmethod
@@ -420,7 +420,7 @@ class SchedulerEngine:
             bad = [b for b in bad if str(b.get("rsrv_ord_no")) in ours]
 
             if bad:
-                lines = [f"⚠ [{ticker}] 예약주문 {len(bad)}건 거부"]
+                lines = [f"⛔ [{ticker}] 예약주문 {len(bad)}건 거부"]
                 for b in bad:
                     self.registry.mark_rejected_by_rsrv_no(b["rsrv_ord_no"], b["reason"])
                     lines.append(f"  {b['ord_qty']}주 @{b['ord_uv']:.2f} — "
@@ -456,7 +456,7 @@ class SchedulerEngine:
         if gone:
             logger.info("[%s] 직접 취소된 LOC %d건 원장 반영", ticker, len(gone))
             await self.notifier.send(
-                f"[{ticker}] 앱에서 취소된 LOC {len(gone)}건을 확인했습니다. "
+                f"🗑 [{ticker}] 앱에서 취소된 LOC {len(gone)}건을 확인했습니다. "
                 f"다시 접수합니다.")
         return len(gone)
 
@@ -486,10 +486,10 @@ class SchedulerEngine:
                    if no not in live and r.trade_type == TradeType.LOC]
         if not missing:
             return
-        lines = [f"⚠ [{ticker}] LOC 주문 {len(missing)}건이 미체결에서 사라졌습니다",
+        lines = [f"⚠️ [{ticker}] LOC 주문 {len(missing)}건이 미체결에서 사라졌습니다",
                  "  종가 전에는 체결될 수 없으니 거부·취소됐을 가능성이 큽니다."]
         for r in missing:
-            side = "매수" if r.side == "buy" else "매도"
+            side = "🔴 매수" if r.side == "buy" else "🔵 매도"
             lines.append(f"  {side} {r.qty}주 @{r.price:.2f} [{r.tag}]")
         lines.append("  키움 앱 주문내역에서 사유를 확인하세요.")
         await self.notifier.send("\n".join(lines))
@@ -505,7 +505,7 @@ class SchedulerEngine:
                 await self._eod_ticker(ticker, trade_date, session)
             except Exception as e:
                 logger.exception("[%s] EOD 실패", ticker)
-                await self.notifier.send(f"⚠ [{ticker}] EOD 정산 실패: {e}")
+                await self.notifier.send(f"⚠️ [{ticker}] EOD 정산 실패: {e}")
                 # EOD 가 실패하면 T값·평단이 갱신되지 않은 채 다음날 주문이 나간다.
                 # 연속 실패하면 멈춘다.
                 try:
@@ -513,7 +513,7 @@ class SchedulerEngine:
                         halted = CircuitBreaker.record_eod_failure(state, str(e))
                     if halted:
                         await self.notifier.send(
-                            f"[{ticker}] EOD 연속 실패로 주문을 정지했습니다.\n"
+                            f"⛔ [{ticker}] EOD 연속 실패로 주문을 정지했습니다.\n"
                             f"확인 후 /unhalt {ticker} 로 해제하세요.")
                 except Exception:
                     logger.exception("[%s] EOD 실패 집계 실패", ticker)
@@ -528,7 +528,7 @@ class SchedulerEngine:
         fills, missed = merge_fill_sources(ws_fills, api_fills)
         if missed:
             await self.notifier.send(
-                f"[{ticker}] WebSocket 이 놓친 체결 {len(missed)}건을 API 조회로 보완했습니다")
+                f"🛟 [{ticker}] WebSocket 이 놓친 체결 {len(missed)}건을 API 조회로 보완했습니다")
 
         quote = await self.kiwoom.get_quote(ticker, exchange)
         close_price = quote["cur_price"] or quote["prev_close"]
@@ -560,9 +560,9 @@ class SchedulerEngine:
             # 정작 확인할 것이 묻힌다. 살아 있던 주문만 보여준다.
             rows = [r for r in self.registry.day_orders(trade_date, ticker)
                     if r.status in ("filled", "partial", "submitted", "expired")]
-            lines = [f"⚠ [{ticker}] 수동 확인이 필요합니다", f"  {trade_date}"]
+            lines = [f"⚠️ [{ticker}] 수동 확인이 필요합니다", f"  {trade_date}"]
             for r in rows:
-                side = "매수" if r.side == "buy" else "매도"
+                side = "🔴 매수" if r.side == "buy" else "🔵 매도"
                 lines.append(f"  {side} {r.qty}주 @{r.price:.2f} [{r.tag}] "
                              f"{ '체결' if r.status == 'filled' else r.status}")
             await self.notifier.send("\n".join(lines))
@@ -610,7 +610,7 @@ class SchedulerEngine:
             await self.notifier.send(result.report())
         if newly_halted:
             await self.notifier.send(
-                f"[{ticker}] 신규 주문을 정지했습니다.\n"
+                f"⛔ [{ticker}] 신규 주문을 정지했습니다.\n"
                 f"증권사 앱에서 실제 잔고를 확인한 뒤,\n"
                 f"필요하면 /fix 로 보정하고 /unhalt {ticker} 로 해제하세요."
             )
@@ -675,7 +675,7 @@ class SchedulerEngine:
         if FundingCheck(need=sum(needs.values()), available=available).ok:
             return
         await self.notifier.send(
-            "1시간 뒤 주문 접수 — 달러가 부족합니다.\n\n"
+            "⏰ 1시간 뒤 주문 접수 — 달러가 부족합니다.\n\n"
             + account_summary(needs, available)
             + "\n\n입금하지 않으면 모자란 만큼 매수를 건너뛰고 매도만 접수합니다.")
 
@@ -688,7 +688,7 @@ class SchedulerEngine:
                 morning_brief(self.state_mgr, self.registry, self, avail))
         except Exception as e:
             logger.exception("아침 요약 생성 실패")
-            await self.notifier.send(f"⚠ 아침 요약 생성 실패: {e}")
+            await self.notifier.send(f"⚠️ 아침 요약 생성 실패: {e}")
 
     async def _health_check(self) -> None:
         try:

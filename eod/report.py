@@ -35,13 +35,13 @@ def trade_history_block(registry: OrderRegistry, ticker: str,
     if not rows:
         return f"[{ticker}] 체결 이력 없음"
 
-    lines = [f"[{ticker}] 일자별 매매 (최근 {len(rows)}일)", ""]
+    lines = [f"📜 [{ticker}] 일자별 매매 (최근 {len(rows)}일)", ""]
     lines.append("No. 일자     구분  평균단가   수량")
     lines.append("-" * 38)
     for i, t in enumerate(rows, start=1):
         d = t["date"]
         label = f"{d[4:6]}.{d[6:8]}" if len(d) == 8 else d
-        side = "매수" if t["side"] == "buy" else "매도"
+        side = "🔴 매수" if t["side"] == "buy" else "🔵 매도"
         lines.append(f"{i:<3} {label}  {side}  "
                      f"{_fmt_money(t['avg_price']):>9}  {t['qty']}주")
     lines.append("-" * 38)
@@ -51,18 +51,19 @@ def trade_history_block(registry: OrderRegistry, ticker: str,
 def position_block(state, registry: OrderRegistry) -> str:
     """현재 진행 상황"""
     t = registry.totals(state.ticker)
+    mode_mark = "🔄" if state.mode == "reverse" else "📈"
     lines = [
-        f"[{state.ticker}] 진행 상황",
-        f"  T값     {state.T:.4f} ({state.division}분할 · {state.mode})",
-        f"  보유     {state.holdings}주 (평단 {_fmt_money(state.avg_price)})",
-        f"  보유원가 {_fmt_money(state.holdings * state.avg_price)}",
-        f"  잔금     {_fmt_money(state.cash)}",
-        f"  누적매수 {_fmt_money(t['buy_amount'])} ({t['buy_qty']}주)",
-        f"  누적매도 {_fmt_money(t['sell_amount'])} ({t['sell_qty']}주)",
+        f"📊 [{state.ticker}] 진행 상황",
+        f"  {mode_mark} T값     {state.T:.4f} ({state.division}분할 · {state.mode})",
+        f"  💎 보유     {state.holdings}주 (평단 {_fmt_money(state.avg_price)})",
+        f"  🧮 보유원가 {_fmt_money(state.holdings * state.avg_price)}",
+        f"  💵 잔금     {_fmt_money(state.cash)}",
+        f"  🔴 누적매수 {_fmt_money(t['buy_amount'])} ({t['buy_qty']}주)",
+        f"  🔵 누적매도 {_fmt_money(t['sell_amount'])} ({t['sell_qty']}주)",
     ]
 
     realized = t["sell_amount"] - (t["buy_amount"] - state.holdings * state.avg_price)
-    lines.append(f"  실현손익 {_fmt_money(realized)}  (이동평균 기준)")
+    lines.append(f"  ⚖️ 실현손익 {_fmt_money(realized)}  (이동평균 기준)")
 
     # 원장 이력과 장부가 어긋나면 체결 누락 신호다.
     #
@@ -70,7 +71,7 @@ def position_block(state, registry: OrderRegistry) -> str:
     # 채로 돌아가는 것을 봤다. 잔고는 증권사 기준으로 교정되니 겉으로는
     # 정상처럼 보이지만, 이력에서 역산한 값이 전부 틀어진다.
     if t["net_qty"] != state.holdings:
-        lines.append(f"  ⚠ 이력 합계 {t['net_qty']}주 ≠ 장부 {state.holdings}주 "
+        lines.append(f"  ⚠️ 이력 합계 {t['net_qty']}주 ≠ 장부 {state.holdings}주 "
                      f"({t['net_qty'] - state.holdings:+d}주) — 체결 누락 의심")
 
     return "\n".join(lines)
@@ -85,22 +86,22 @@ def crosscheck_block(state) -> str:
     line = f"  역산 T   {d:.4f} (장부 {state.T:.4f}, 차이 {drift:.2f})"
     if drift >= 2.0:
         line += "  ← 확인 필요"
-    return "교차검증\n" + line
+    return "🔎 교차검증\n" + line
 
 
 def next_plan_block(plan) -> str:
     """다음 거래일 주문 계획"""
     if plan is None or not plan.orders:
         return "다음 거래일 주문 없음"
-    lines = [f"다음 거래일 계획 (1회매수액 {_fmt_money(plan.unit_amount)})"]
+    lines = [f"📋 다음 거래일 계획 (1회매수액 {_fmt_money(plan.unit_amount)})"]
     if plan.star_point is not None:
-        lines.append(f"  별지점 {plan.star_point:.2f}")
+        lines.append(f"  ⭐ 별지점 {plan.star_point:.2f}")
     for o in plan.orders:
         price = f"{o.price:.2f}" if o.price is not None else "MKT"
-        side = "매수" if o.side == "buy" else "매도"
+        side = "🔴 매수" if o.side == "buy" else "🔵 매도"
         lines.append(f"  {side} {o.qty:>3}주 @{price:>8}  {o.tag}")
     for w in plan.warnings:
-        lines.append(f"  ⚠ {w}")
+        lines.append(f"  ⚠️ {w}")
     return "\n".join(lines)
 
 
@@ -132,7 +133,7 @@ def daily_report(
         from eod.stats import cycle_pnl_line
         line = cycle_pnl_line(state, stats)
         if line:
-            blocks.append("사이클\n" + line)
+            blocks.append("🔁 사이클\n" + line)
 
     cross = crosscheck_block(state)
     if cross:
@@ -141,7 +142,7 @@ def daily_report(
     if eod_result is not None:
         today = []
         if eod_result.t_result and eod_result.t_result.steps:
-            today.append(f"오늘 정산 — 체결 {eod_result.fills_applied}건")
+            today.append(f"🧾 오늘 정산 — 체결 {eod_result.fills_applied}건")
             today.append(f"  T {eod_result.t_result.t_before:.4f} "
                          f"→ {eod_result.t_result.t_after:.4f}")
             for s in eod_result.t_result.steps:
@@ -149,11 +150,11 @@ def daily_report(
             if eod_result.realized_pl:
                 today.append(f"  실현손익 {_fmt_money(eod_result.realized_pl)}")
         else:
-            today.append("오늘 체결 없음")
+            today.append("🧾 오늘 정산 — 체결 없음")
         if eod_result.mode_transition:
-            today.append(f"  모드 전환: {eod_result.mode_transition}")
+            today.append(f"  🔄 모드 전환: {eod_result.mode_transition}")
         if eod_result.cycle_closed:
-            today.append("  사이클 종료")
+            today.append("  🏁 사이클 종료")
         blocks.append("\n".join(today))
 
         blocks.append(next_plan_block(eod_result.next_plan))
@@ -162,7 +163,7 @@ def daily_report(
         alerts += [f"매칭 실패: {f.side} {f.qty}주 @{f.price:.2f}"
                    for f in eod_result.unmatched_fills]
         if alerts:
-            blocks.append("확인 필요\n" + "\n".join(f"  ⚠ {a}" for a in alerts))
+            blocks.append("⚠️ 확인 필요\n" + "\n".join(f"  · {a}" for a in alerts))
 
     halt = CircuitBreaker.status_line(state)
     if halt:

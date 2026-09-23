@@ -501,6 +501,102 @@ def test_calceod_routed_to_scheduler():
 
 
 # ================================================================
+# 관제탑 렌더링
+#
+# 별지점 블록은 보유가 0이면 통째로 건너뛴다. 그래서 속성명을 잘못 쓴
+# 채로도 며칠간 드러나지 않다가, 첫 매수가 체결된 날 /status 가
+# "스캔 중..." 에서 멈췄다 (AttributeError: star_point).
+# ================================================================
+
+def _status_handler(sm):
+    from core.timezone_handler import USMarketTimezone
+    from tg_bot.commands_handler import CommandsHandler
+
+    h = CommandsHandler.__new__(CommandsHandler)
+    h.state, h.registry, h.kiwoom = sm, None, None
+    h.tz = USMarketTimezone()
+    sent = []
+
+    async def _reply(msg, text, **k):
+        sent.append(text)
+        return object()
+    h._safe_reply = _reply
+
+    async def _edit(msg, text, **k):
+        sent.append(text)
+    h._safe_edit = _edit
+
+    async def _uid(u):
+        return USER
+    h._get_user_id = _uid
+    return h, sent
+
+
+class _NullUpdate:
+    effective_message = object()
+
+
+def _run_status(sm):
+    h, sent = _status_handler(sm)
+    asyncio.run(h.cmd_status(_NullUpdate(), type("C", (), {"args": []})()))
+    return sent
+
+
+def test_status_renders_with_holdings():
+    """첫 매수 체결 후 — 별지점 블록이 실제로 그려져야 한다"""
+    m = _mgr()
+    st = m.get_state(USER, "TQQQ")
+    st.T, st.holdings, st.avg_price, st.cash = 1.0, 3, 151.95, 19543.83
+    m.save_state(st)
+
+    sent = _run_status(m)
+    body = sent[-1]
+    assert "별지점" in body
+    assert "스캔 중" not in body
+    assert "T값" in body and "1.0000" in body
+
+
+def test_status_shows_star_percent_and_prices():
+    m = _mgr()
+    st = m.get_state(USER, "TQQQ")
+    st.T, st.holdings, st.avg_price = 8.0, 30, 100.0
+    m.save_state(st)
+
+    body = _run_status(m)[-1]
+    assert "+9.00%" in body          # TQQQ 40분할: 15 - 0.75×8
+    assert "$109.00" in body         # 별지점
+    assert "$108.99" in body         # 매수가
+
+
+def test_status_without_holdings_skips_star():
+    """보유 0이면 별지점 줄이 없다 (이 경로가 버그를 가리고 있었다)"""
+    m = _mgr()
+    body = _run_status(m)[-1]
+    assert "별지점" not in body
+    assert "스캔 중" not in body
+
+
+def test_status_reverse_mode_does_not_crash():
+    m = _mgr()
+    st = m.get_state(USER, "TQQQ")
+    st.mode, st.holdings, st.avg_price = "reverse", 30, 100.0
+    st.last_star_point = 88.5
+    m.save_state(st)
+
+    body = _run_status(m)[-1]
+    assert "MA5" in body
+    assert "85.00" in body           # 회복 기준 (평단 -15%)
+
+
+def test_star_point_attribute_name():
+    """StarPoint 의 속성은 star 다. star_point 는 OrderPlan 쪽 이름이다."""
+    from core.star_point import normal_star_point
+    sp = normal_star_point("TQQQ", 40, 100.0, 8.0)
+    assert sp.star == 109.00
+    assert not hasattr(sp, "star_point")
+
+
+# ================================================================
 
 if __name__ == "__main__":
     failed = 0

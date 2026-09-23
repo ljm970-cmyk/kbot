@@ -128,7 +128,7 @@ class CommandsHandler:
                 report += f"❌ <b>{html.escape(ticker)}</b>: 상태 없음\n\n"
                 continue
             
-            mode_icon = "🔄" if st['mode'] == 'normal' else "🔁"
+            mode_icon = "📈" if st['mode'] == 'normal' else "🔄"
             phase = self._get_phase(st)
             
             report += (
@@ -159,14 +159,20 @@ class CommandsHandler:
                         pct_txt = f" <code>({pct:+.2f}%)</code>"
                     except ValueError:
                         pct_txt = ""
+                    # 속성명은 star 다. star_point 로 쓰면 AttributeError 가 나고
+                    # cmd_status 가 "스캔 중..." 에서 멈춘다. 보유가 0이면 이
+                    # 블록을 건너뛰어서, 첫 매수가 체결된 날에야 드러난다.
                     report += (
-                        f"├ ⭐ 별지점: <code>${sc.star_point:.2f}</code>{pct_txt}\n"
+                        f"├ ⭐ 별지점: <code>${sc.star:.2f}</code>{pct_txt}\n"
                         f"├ 　 매수 <code>${sc.buy_price:.2f}</code> · "
                         f"매도 <code>${sc.sell_price:.2f}</code>\n"
                     )
                 else:
-                    star_pct = StarPointCalculator.STAR_PCT_REVERSE[ticker]
-                    recover = st['avg_price'] * (1 + star_pct / 100)
+                    # 리버스 종료 기준가. 구버전 상수(STAR_PCT_REVERSE)는
+                    # 더 이상 없다 — 이 줄 때문에 리버스로 전환되는 날
+                    # /status 가 통째로 멈췄을 것이다.
+                    recover = StarPointCalculator.recover_price(
+                        ticker, st['avg_price'])
                     ma5 = st.get('last_star_point', 0) or 0
                     if ma5 > 0:
                         report += (

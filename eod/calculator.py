@@ -489,18 +489,34 @@ def fills_from_api_rows(rows: Sequence[dict], registry: OrderRegistry = None) ->
 
     체결수량이 0인 행(미체결·취소)은 걸러낸다.
     """
+    # 한 주문의 체결 합계는 주문수량을 넘을 수 없다.
+    #
+    # ust21510 이 같은 체결을 두 행으로 돌려주는 경우가 있다(실측
+    # 2026-09-23: 3주 체결 1건이 두 번). 체결번호나 시각이 달라 중복
+    # 제거에 걸리지 않고, 원장이 두 번째를 막아 "매칭 실패" 로 신고됐다.
+    filled = {}
     events = []
     for r in rows:
         cntr_qty = int(r.get("cntr_qty") or 0)
         if cntr_qty <= 0:
             continue
+        no = str(r.get("ord_no", ""))
+        ord_qty = int(r.get("ord_qty") or 0)
+        if no and ord_qty > 0:
+            done = filled.get(no, 0)
+            if done >= ord_qty:
+                logger.info("주문수량(%d주)을 이미 채운 체결 행을 건너뜁니다: %s",
+                            ord_qty, no)
+                continue
+            cntr_qty = min(cntr_qty, ord_qty - done)
+            filled[no] = done + cntr_qty
         events.append(FillEvent(
             ticker=r.get("stk_cd", ""),
             side=r.get("side", ""),
             qty=cntr_qty,
             price=float(r.get("cntr_uv") or 0),
             order_price=float(r.get("ord_uv") or 0) or None,
-            ord_no=str(r.get("ord_no", "")),
+            ord_no=no,
             fill_no=str(r.get("fill_no", "") or ""),
             trade_type=r.get("trade_type", ""),
             time=r.get("cntr_time", ""),

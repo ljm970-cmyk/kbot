@@ -556,8 +556,16 @@ class SchedulerEngine:
         await self._reconcile_ticker(ticker, exchange, result)
 
         if result.anomalies or result.unmatched_fills:
-            await self.notifier.send(
-                f"⚠ [{ticker}] 수동 확인이 필요합니다\n" + self.registry.day_summary(trade_date, ticker))
+            # 그날 주문 전부(취소·거부 포함)를 나열하면 화면이 길어져
+            # 정작 확인할 것이 묻힌다. 살아 있던 주문만 보여준다.
+            rows = [r for r in self.registry.day_orders(trade_date, ticker)
+                    if r.status in ("filled", "partial", "submitted", "expired")]
+            lines = [f"⚠ [{ticker}] 수동 확인이 필요합니다", f"  {trade_date}"]
+            for r in rows:
+                side = "매수" if r.side == "buy" else "매도"
+                lines.append(f"  {side} {r.qty}주 @{r.price:.2f} [{r.tag}] "
+                             f"{ '체결' if r.status == 'filled' else r.status}")
+            await self.notifier.send("\n".join(lines))
 
     # ------------------------------------------------------------
     # 장부 대조

@@ -283,6 +283,43 @@ def test_all_buy_prices_distinct_across_price_levels():
         assert len(prices) == len(set(prices)), f"평단 {price} 에서 단가 중복"
 
 
+def test_guard_does_not_fire_early_in_cycle():
+    """사이클 초반에는 별지점이 현재가보다 19~20% 위에 놓인다. 정상이다.
+
+    실제 사례(2026-09-23): 평단 151.95, 현재가 150.86, T=1 에서 별지점이
+    180.82(+19.85%) 였는데 기준이 18% 라 대체주문이 발동해, 별지점 1주 +
+    평단 2주가 2주 @173.49 단건으로 바뀌었다. 방법론이라면 사지 않았을
+    가격에도 매수가 들어간다.
+    """
+    st = PositionState(ticker="SOXL", division=40, principal=20000, fee_rate=0.0007,
+                       T=1.0, avg_price=151.95, holdings=3, cash=19543.83)
+    p = NormalMode(st).plan(MarketSnapshot(prev_close=150.86, current_price=150.86))
+
+    assert _by_tag(p, FillKind.GUARD_BUY) == []
+    star = _by_tag(p, FillKind.STAR_BUY)
+    avg = _by_tag(p, FillKind.AVG_BUY)
+    assert len(star) == 1 and len(avg) == 1
+    assert star[0].price == 180.81 and star[0].qty == 1
+    assert avg[0].price == 151.95 and avg[0].qty == 2
+
+
+def test_guard_still_fires_in_real_crash():
+    """평단이 현재가보다 한참 위인 폭락에서는 여전히 발동한다"""
+    st = PositionState(ticker="SOXL", division=40, principal=20000, fee_rate=0.0007,
+                       T=20.0, avg_price=200.0, holdings=60, cash=10000)
+    p = NormalMode(st).plan(MarketSnapshot(prev_close=100.0, current_price=100.0))
+    guard = _by_tag(p, FillKind.GUARD_BUY)
+    assert len(guard) == 1
+    assert guard[0].price == 115.00
+    assert _by_tag(p, FillKind.STAR_BUY) == [] and _by_tag(p, FillKind.AVG_BUY) == []
+
+
+def test_guard_threshold_above_max_star_pct():
+    """별% 최대치(20%)보다 기준이 높아야 정상 구간에서 발동하지 않는다"""
+    from core.star_point import PRICE_GUARD_PCT
+    assert PRICE_GUARD_PCT > 0.20
+
+
 def test_guard_does_not_fire_on_rally():
     """주가가 매수가보다 한참 위로 올라간 경우는 거부가 아니라
     단순 미체결이다. 여기서 대체주문을 걸면 상승장에서 고점 매수를 한다."""

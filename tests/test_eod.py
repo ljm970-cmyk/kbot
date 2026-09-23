@@ -503,6 +503,41 @@ def test_validate_returns_none_for_good_fill():
     assert FillEvent(TICKER, "buy", 3, 68.0, order_price=76.02).validate() is None
 
 
+def test_duplicate_api_rows_for_same_order():
+    """실측 2026-09-23: ust21510 이 같은 체결(3주)을 두 행으로 돌려줬다.
+    체결번호·시각이 달라 중복 제거에 걸리지 않고, 원장이 두 번째를 막아
+    "매칭 실패" 로 신고됐다. 한 주문의 체결 합계는 주문수량을 넘을 수 없다.
+    """
+    row = {"stk_cd": TICKER, "side": "buy", "ord_no": "A1", "ord_qty": 3,
+           "cntr_qty": 3, "cntr_uv": 151.95, "ord_uv": 163.11,
+           "fill_no": "1", "cntr_time": "160000", "trade_type": "30"}
+    dup = {**row, "fill_no": "2", "cntr_time": "160001"}
+    events = fills_from_api_rows([row, dup])
+    assert len(events) == 1
+    assert events[0].qty == 3
+
+
+def test_partial_fills_of_same_order_kept():
+    """부분체결은 합계가 주문수량 이내라 모두 살려야 한다"""
+    base = {"stk_cd": TICKER, "side": "buy", "ord_no": "A1", "ord_qty": 5,
+            "cntr_uv": 151.95, "ord_uv": 163.11, "trade_type": "30"}
+    events = fills_from_api_rows([
+        {**base, "cntr_qty": 2, "fill_no": "1"},
+        {**base, "cntr_qty": 3, "fill_no": "2"},
+    ])
+    assert [e.qty for e in events] == [2, 3]
+
+
+def test_overfill_row_is_capped():
+    base = {"stk_cd": TICKER, "side": "buy", "ord_no": "A1", "ord_qty": 3,
+            "cntr_uv": 151.95, "ord_uv": 163.11, "trade_type": "30"}
+    events = fills_from_api_rows([
+        {**base, "cntr_qty": 2, "fill_no": "1"},
+        {**base, "cntr_qty": 5, "fill_no": "2"},
+    ])
+    assert [e.qty for e in events] == [2, 1]
+
+
 # ================================================================
 
 if __name__ == "__main__":

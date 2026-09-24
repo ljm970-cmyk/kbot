@@ -538,6 +538,52 @@ def test_overfill_row_is_capped():
     assert [e.qty for e in events] == [2, 1]
 
 
+def test_same_fill_with_different_ord_no_padding():
+    """실측 2026-09-24: 같은 체결이 WebSocket 과 API 에서 자리수가 다른
+    주문번호로 와, 둘 다 반영되려다 "매칭 실패" 로 신고됐다."""
+    ws = [FillEvent(TICKER, "buy", 1, 146.25, order_price=180.81,
+                    ord_no="0000010928", fill_no="1")]
+    api = [FillEvent(TICKER, "buy", 1, 146.25, order_price=180.81,
+                     ord_no="000010928", cntr_time="160000")
+           if False else
+           FillEvent(TICKER, "buy", 1, 146.25, order_price=180.81,
+                     ord_no="000010928", time="160000")]
+    merged, missed = merge_fill_sources(ws, api)
+    assert sum(e.qty for e in merged) == 1
+    assert missed == []
+
+
+def test_ws_only_fill_without_ord_no_is_not_duplicated():
+    """WebSocket 이 주문번호 없이 준 체결이 API 것과 같은 모양이면
+    한 번만 센다."""
+    ws = [FillEvent(TICKER, "buy", 2, 146.25, order_price=151.95, ord_no="")]
+    api = [FillEvent(TICKER, "buy", 2, 146.25, order_price=151.95,
+                     ord_no="000010929", time="160000")]
+    merged, _ = merge_fill_sources(ws, api)
+    assert sum(e.qty for e in merged) == 2
+
+
+def test_genuinely_different_fill_still_added():
+    """모양이 다르면 별개 체결이므로 살려야 한다"""
+    ws = [FillEvent(TICKER, "buy", 1, 140.00, order_price=151.95, ord_no="")]
+    api = [FillEvent(TICKER, "buy", 2, 146.25, order_price=151.95,
+                     ord_no="000010929", time="160000")]
+    merged, _ = merge_fill_sources(ws, api)
+    assert sum(e.qty for e in merged) == 3
+
+
+def test_registry_matches_ord_no_regardless_of_padding():
+    from core.order_registry import normalize_ord_no
+    state, reg, plan, eod = _setup()
+    rid = reg.record_submission(DAY, TICKER, plan.orders[0])
+    reg.attach_ord_no(rid, "000010928")
+
+    assert normalize_ord_no("0000010928") == normalize_ord_no("000010928")
+    assert reg.by_ord_no("0000010928") is not None
+    assert reg.by_ord_no("10928") is not None
+    assert reg.by_ord_no("999") is None
+
+
 # ================================================================
 
 if __name__ == "__main__":

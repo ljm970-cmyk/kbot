@@ -41,6 +41,18 @@ logger = logging.getLogger("kbot.registry")
 PRICE_TOLERANCE = 0.005
 
 
+def normalize_ord_no(value) -> str:
+    """주문번호 비교용 정규화.
+
+    같은 주문인데 경로마다 자리수가 다르게 온다. 주문 응답은
+    "000010928", WebSocket(F5 9203)은 앞자리 0 개수가 달라질 수 있다.
+    문자열 그대로 비교하면 같은 체결이 서로 다른 주문으로 보여,
+    합본 단계에서 중복으로 들어오고 "매칭 실패" 로 신고된다.
+    """
+    text = str(value or "").strip()
+    return text.lstrip("0") or ("0" if text else "")
+
+
 class OrderStatus:
     SUBMITTED = "submitted"     # 접수 완료
     REJECTED = "rejected"       # 예약 검증에서 거부됨
@@ -249,10 +261,21 @@ class OrderRegistry:
             return self._row(r) if r else None
 
     def by_ord_no(self, ord_no: str) -> Optional[OrderRecord]:
+        """주문번호로 찾기. 자리수가 달라도 맞춘다."""
         with self._conn() as c:
             r = c.execute(f"SELECT {_COLUMNS} FROM orders WHERE ord_no=? AND ord_no!=''",
                           (str(ord_no),)).fetchone()
-            return self._row(r) if r else None
+            if r:
+                return self._row(r)
+
+            want = normalize_ord_no(ord_no)
+            if not want:
+                return None
+            for row in c.execute(
+                    f"SELECT {_COLUMNS} FROM orders WHERE ord_no!=''"):
+                if normalize_ord_no(row["ord_no"]) == want:
+                    return self._row(row)
+        return None
 
     def open_orders(self, trade_date: str, ticker: str = "") -> list[OrderRecord]:
         with self._conn() as c:

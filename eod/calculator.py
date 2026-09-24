@@ -446,11 +446,18 @@ def merge_fill_sources(
     Returns:
         (합본, WebSocket 이 놓친 체결)
     """
+    from core.order_registry import normalize_ord_no
+
     def _by_ord(events):
         grouped: dict[str, list[FillEvent]] = {}
         for e in events:
-            grouped.setdefault(e.ord_no or "", []).append(e)
+            grouped.setdefault(normalize_ord_no(e.ord_no), []).append(e)
         return grouped
+
+    def _shape(e):
+        """주문번호를 빼고 본 체결의 모양. 번호가 안 맞을 때의 최후 대조."""
+        return (e.side, e.qty, round(e.price, 4),
+                round(e.order_price, 4) if e.order_price else None)
 
     ws_grouped = _by_ord(websocket_fills)
     api_grouped = _by_ord(api_fills)
@@ -474,10 +481,22 @@ def merge_fill_sources(
         else:
             merged.extend(ws_events)
 
-    # API 에는 없고 WebSocket 에만 있는 주문 (조회 반영이 늦은 경우)
+    # API 에는 없고 WebSocket 에만 있는 주문 (조회 반영이 늦은 경우).
+    #
+    # 번호 형식이 달라 같은 체결이 양쪽에 따로 잡히는 경우가 있어,
+    # 모양(매매구분·수량·체결가·주문가)이 같은 것이 이미 들어갔으면
+    # 넣지 않는다. 넣으면 원장이 막아 "매칭 실패" 로 신고된다.
+    seen_shapes = [_shape(e) for e in merged]
     for ord_no, ws_events in ws_grouped.items():
-        if ord_no not in api_grouped:
-            merged.extend(ws_events)
+        if ord_no in api_grouped:
+            continue
+        for e in ws_events:
+            sh = _shape(e)
+            if sh in seen_shapes:
+                logger.info("같은 모양의 체결이 이미 있어 건너뜁니다: %s", sh)
+                continue
+            seen_shapes.append(sh)
+            merged.append(e)
 
     if missed:
         logger.warning("WebSocket 이 놓친 체결 %d건을 API 조회로 보완합니다", len(missed))

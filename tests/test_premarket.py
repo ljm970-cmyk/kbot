@@ -312,6 +312,67 @@ def test_live_loc_is_quiet():
 
 
 # ================================================================
+# 접수 성공 알림
+#
+# 원본은 실패·거부일 때만 알렸다. 잘 들어간 날은 조용해서 주문이
+# 나갔는지 확인하려면 매번 /orders 를 쳐야 했다.
+# ================================================================
+
+def _report(placed, label="LOC 접수"):
+    from scheduler.engine import SchedulerEngine
+    return SchedulerEngine._submit_report("SOXL", label, placed)
+
+
+def test_submit_report_lists_orders():
+    text = _report([
+        _order(FillKind.STAR_BUY, "buy", TradeType.LOC, qty=1, price=175.93),
+        _order(FillKind.AVG_BUY, "buy", TradeType.LOC, qty=2, price=149.10),
+    ])
+    assert "· 2건" in text
+    assert "175.93" in text and "149.10" in text
+    assert "star_buy" in text and "avg_buy" in text
+
+
+def test_submit_report_shows_cost_for_buys():
+    text = _report([
+        _order(FillKind.STAR_BUY, "buy", TradeType.LOC, qty=1, price=100.0),
+        _order(FillKind.AVG_BUY, "buy", TradeType.LOC, qty=2, price=50.0),
+    ])
+    assert "$200.00" in text
+
+
+def test_submit_report_sells_have_no_cost_line():
+    text = _report([
+        _order(FillKind.TARGET_SELL, "sell", TradeType.LIMIT, qty=4, price=178.92),
+    ], label="지정가매도")
+    assert "🔵 매도" in text
+    assert "소요" not in text
+
+
+def test_submit_report_shortens_order_kind():
+    text = _report([_order(FillKind.STAR_BUY, "buy", TradeType.LOC, qty=1, price=1.0)])
+    assert "LOC" in text
+    assert "On Close" not in text
+
+
+def test_submit_report_sells_first():
+    """매도가 먼저 접수되므로 알림도 같은 순서로 읽힌다"""
+    text = _report([
+        _order(FillKind.STAR_BUY, "buy", TradeType.LOC, qty=1, price=175.93),
+        _order(FillKind.QUARTER_SELL, "sell", TradeType.LOC, qty=2, price=175.94),
+    ])
+    assert text.index("매도") < text.index("매수")
+
+
+def test_success_notification_is_sent():
+    src = (ROOT / "scheduler" / "engine.py").read_text(encoding="utf-8")
+    block = src[src.index("logger.info(\"[%s] %s %d/%d건 접수\""):]
+    block = block[:block.index("@staticmethod")]
+    assert "_submit_report" in block
+    assert "elif placed:" in block
+
+
+# ================================================================
 
 if __name__ == "__main__":
     failed = 0
@@ -326,3 +387,5 @@ if __name__ == "__main__":
     print("-" * 60)
     print("전부 통과" if failed == 0 else f"{failed}건 실패")
     sys.exit(1 if failed else 0)
+
+

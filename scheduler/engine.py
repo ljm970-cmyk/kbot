@@ -314,6 +314,7 @@ class SchedulerEngine:
 
         exchange = exchange_of(ticker)
         submitted = 0
+        placed: list = []
         for order in orders:
             record_id = self.registry.record_submission(trade_date, ticker, order)
             try:
@@ -323,6 +324,7 @@ class SchedulerEngine:
                     self.registry.attach_rsrv_ord_no(record_id, res.rsrv_ord_no)
                 elif getattr(res, "ord_no", ""):
                     self.registry.attach_ord_no(record_id, res.ord_no)
+                placed.append(order)
                 submitted += 1
             except KiwoomOrderUncertainError as e:
                 # 접수됐는지 알 수 없다. 원장에 남겨두고(삭제하지 않는다)
@@ -354,6 +356,34 @@ class SchedulerEngine:
             await self.notifier.send(
                 f"⚠️ [{ticker}] {label} {len(orders)}건이 모두 실패했습니다. "
                 f"증권사 앱에서 주문 상태를 확인하세요.")
+        elif placed:
+            # 접수 성공 알림.
+            #
+            # 원본은 실패·거부일 때만 알렸다. 잘 들어간 날은 조용해서,
+            # 주문이 나갔는지 확인하려면 매번 /orders 를 쳐야 했다.
+            await self.notifier.send(self._submit_report(ticker, label, placed))
+
+    @staticmethod
+    def _submit_report(ticker: str, label: str, placed: list) -> str:
+        """접수 결과 요약"""
+        buys = [o for o in placed if o.side == "buy"]
+        sells = [o for o in placed if o.side == "sell"]
+        L = [f"📤 [{ticker}] {label} · {len(placed)}건"]
+
+        for group, mark, name in ((sells, "🔵", "매도"), (buys, "🔴", "매수")):
+            if not group:
+                continue
+            L.append("")
+            for o in group:
+                price = f"@{o.price:.2f}" if o.price is not None else "시장가"
+                kind = {TradeType.LOC: "LOC", TradeType.MOC: "MOC",
+                        TradeType.LIMIT: "지정가"}.get(o.trade_type, o.trade_type)
+                L.append(f"  {mark} {name} {o.qty:>2}주 {price:>9}  {kind}  {o.tag}")
+
+        if buys:
+            L.append("")
+            L.append(f"  💵 소요 ${sum(o.amount for o in buys):,.2f}")
+        return "\n".join(L)
 
     @staticmethod
     def _orders_for_window(plan: OrderPlan, window: str) -> list[PlannedOrder]:

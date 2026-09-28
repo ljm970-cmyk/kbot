@@ -172,7 +172,17 @@ def reconcile(
         r.broker_holdings = bh
         r.broker_avg_price = ba
 
-        if bh != state.holdings:
+        split = detect_split(state.holdings, state.avg_price, bh, ba)
+
+        if split:
+            # 수량만 바뀌고 보유원가는 그대로 — T·잔금은 건드리지 않는다.
+            r.findings.append(Finding(
+                Severity.WARNING, "split_detected",
+                f"액면{split.name}({split.text}) 감지 — "
+                f"{state.holdings}주 @${state.avg_price:.2f} → "
+                f"{bh}주 @${ba:.2f}. 보유원가는 그대로라 T와 잔금은 "
+                f"유지합니다. 옛 가격으로 걸린 주문은 취소합니다."))
+        elif bh != state.holdings:
             if is_within_auto_correct(state.holdings, bh):
                 # 부분체결 반올림 수준 — 조용히 맞추고 넘어간다
                 r.findings.append(Finding(
@@ -186,7 +196,10 @@ def reconcile(
                     f"체결 누락이나 수동 거래가 있었는지 확인하세요."))
 
         # --- 평단 ---
-        if state.holdings > 0 and state.avg_price > 0 and ba > 0:
+        #
+        # 분할·병합이면 평단이 배수로 바뀌는 게 정상이다. 건너뛰지 않으면
+        # 1:10 병합에서 "평단 괴리 900%" 로 정지해버린다.
+        if split is None and state.holdings > 0 and state.avg_price > 0 and ba > 0:
             drift = abs(ba - state.avg_price) / state.avg_price
             if drift >= AVG_PRICE_CRITICAL:
                 r.findings.append(Finding(
@@ -204,6 +217,12 @@ def reconcile(
         # 맞더라도 체결 종류를 잘못 해석했을 수 있다.
         if bh > 0 and ba > 0:
             r.derived_T = derive_t(bh, ba, state.principal, state.division)
+            if split is not None:
+                # 분할 직후 역산 T는 교정 전 수량 기준이라 의미가 없다
+                r.findings.append(Finding(
+                    Severity.OK, "t_check_skipped",
+                    "분할·병합 직후라 T 교차검증을 건너뜁니다."))
+                return r
             drift = abs(r.derived_T - state.T)
             if drift >= T_DRIFT_TOLERANCE:
                 r.findings.append(Finding(
@@ -388,6 +407,53 @@ class CircuitBreaker:
         return (f"⛔ 주문 정지 중 ({getattr(state, 'halted_at', '')})\n"
                 f"  사유: {getattr(state, 'halt_reason', '')}\n"
                 f"  확인 후 /unhalt {state.ticker} 로 해제하세요.")
+
+
+#: 흔한 분할·병합 비율. 이 근처면 분할로 본다.
+_SPLIT_RATIOS = (1/20, 1/15, 1/10, 1/8, 1/5, 1/4, 1/3, 1/2,
+                 2, 3, 4, 5, 8, 10, 15, 20)
+
+
+@dataclass
+class SplitInfo:
+    ratio: float          # 증권사 수량 / 장부 수량
+    name: str             # "분할" 또는 "병합"
+
+    @property
+    def text(self) -> str:
+        if self.ratio >= 1:
+            return f"1:{self.ratio:g}"
+        return f"{1 / self.ratio:g}:1"
+
+
+def detect_split(ledger_qty: int, ledger_avg: float,
+                 broker_qty: int, broker_avg: float) -> Optional[SplitInfo]:
+    """액면분할·병합인지 판정한다.
+
+    분할·병합은 수량과 단가가 반대로 움직이고 **보유원가는 보존된다**.
+    체결 누락은 수량이 늘면 원가도 같이 늘어나므로 구별된다.
+
+      1:10 병합   60주 @$10  → 6주 @$100   (원가 $600 그대로)
+      체결 누락   60주 @$10  → 66주 @$10   (원가 $660 으로 증가)
+
+    단주는 현금청산되므로 원가가 몇 % 줄 수 있다. 그만큼 여유를 둔다.
+    """
+    if ledger_qty <= 0 or broker_qty == ledger_qty or ledger_avg <= 0:
+        return None
+
+    ratio = broker_qty / ledger_qty
+    near = min(_SPLIT_RATIOS, key=lambda c: abs(ratio - c))
+    if abs(ratio - near) / near > 0.06:      # 단주 청산 여유
+        return None
+
+    ledger_cost = ledger_qty * ledger_avg
+    broker_cost = broker_qty * broker_avg
+    if broker_cost <= 0:
+        return SplitInfo(near, "병합" if near < 1 else "분할")
+    if abs(broker_cost - ledger_cost) / ledger_cost > 0.10:
+        return None                          # 원가가 바뀌었으면 분할이 아니다
+
+    return SplitInfo(near, "병합" if near < 1 else "분할")
 
 
 def apply_reconcile(state, result: ReconcileResult,

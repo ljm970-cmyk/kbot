@@ -638,12 +638,54 @@ class SchedulerEngine:
 
         if result.severity != "ok":
             await self.notifier.send(result.report())
+
+        # 액면분할·병합이면 옛 가격으로 걸린 주문을 거둔다.
+        #
+        # 분할 후에도 그대로 두면 값이 엉뚱해진다. 병합(1:10)이면 매도
+        # 주문이 새 가격보다 한참 아래라 즉시 체결되고, 분할(1:2)이면
+        # 매수 주문이 새 가격보다 위라 계획에 없던 매수가 들어간다.
+        if any(f.code == "split_detected" for f in result.findings):
+            await self._cancel_stale_orders(ticker, exchange)
+
         if newly_halted:
             await self.notifier.send(
                 f"⛔ [{ticker}] 신규 주문을 정지했습니다.\n"
                 f"증권사 앱에서 실제 잔고를 확인한 뒤,\n"
                 f"필요하면 /fix 로 보정하고 /unhalt {ticker} 로 해제하세요."
             )
+
+    async def _cancel_stale_orders(self, ticker: str, exchange: str) -> None:
+        """봇이 낸 미체결 주문을 모두 취소한다 (분할·병합 직후)."""
+        ours = self.registry.bot_live_orders(ticker)
+        if not ours:
+            return
+        try:
+            live = await self.kiwoom.get_open_orders(ticker, exchange)
+        except Exception as e:
+            logger.warning("[%s] 미체결 조회 실패 — 수동 취소가 필요합니다: %s", ticker, e)
+            await self.notifier.send(
+                f"⚠️ [{ticker}] 분할·병합 후 미체결을 조회하지 못했습니다. "
+                f"증권사 앱에서 남은 주문을 직접 취소하세요.")
+            return
+
+        done, failed = 0, []
+        for row in live:
+            no = str(row.get("ord_no", ""))
+            rec = ours.get(no)
+            if rec is None:
+                continue
+            try:
+                await self.kiwoom.cancel(no, ticker, exchange)
+                self.registry.set_status(rec.id, "cancelled", "분할·병합으로 취소")
+                done += 1
+            except Exception as e:
+                failed.append(f"{rec.qty}주 @{rec.price:.2f} — {str(e)[:40]}")
+
+        lines = [f"🗑 [{ticker}] 분할·병합으로 옛 주문 {done}건을 취소했습니다."]
+        if failed:
+            lines.append(f"  ⚠️ 취소 실패 {len(failed)}건 — 앱에서 직접 취소하세요")
+            lines += [f"    {f}" for f in failed]
+        await self.notifier.send("\n".join(lines))
 
     # ------------------------------------------------------------
     # 시세

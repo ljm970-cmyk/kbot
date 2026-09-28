@@ -285,6 +285,8 @@ class EndOfDayCalculator:
         if result.next_plan is not None:
             from core.funding import buy_need
             state.next_buy_need = buy_need(result.next_plan, state.fee_rate)
+            from core.funding import core_buy_need
+            state.next_core_need = core_buy_need(result.next_plan, state.fee_rate)
         result.mode_after = state.mode
         return result
 

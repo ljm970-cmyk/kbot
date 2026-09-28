@@ -61,6 +61,12 @@ from modes.reverse_mode import ReverseMode
 logger = logging.getLogger("kbot.scheduler")
 
 
+def _core_or_full(st) -> float:
+    """핵심 매수 금액. 아직 계산 전(-1)이면 전체 금액으로 대신한다."""
+    core = getattr(st, "next_core_need", -1.0)
+    return core if core >= 0 else getattr(st, "next_buy_need", 0.0)
+
+
 class Notifier(Protocol):
     """텔레그램 등 알림 채널"""
     async def send(self, text: str) -> None: ...
@@ -217,7 +223,7 @@ class SchedulerEngine:
 
     async def submit_loc_orders(self, session: date) -> None:
         """LOC/MOC 예약주문 접수"""
-        await self._submit(session, SubmitWindow.REGULAR, "LOC 예약")
+        await self._submit(session, SubmitWindow.REGULAR, "LOC 접수")
 
     async def _submit(self, session: date, window: str, label: str) -> None:
         trade_date = session.strftime("%Y%m%d")
@@ -280,11 +286,14 @@ class SchedulerEngine:
                 return
 
         # 자금 점검 — 매수만 해당. 매도는 돈이 없어도 낸다.
+        #
+        # 가진 달러 안에서 우선순위대로 들어갈 수 있는 만큼만 낸다.
+        # 원본은 폭락대비까지 합친 금액이 모자라면 매수를 통째로 건너뛰었다.
+        # 폭락대비는 거의 체결되지 않는 주문인데 예수금을 가장 많이 묶어서,
+        # 정작 별지점·평단 매수가 빠지고 방법론이 그날 멈췄다.
         buys = [o for o in orders if o.side == "buy"]
         if buys:
-            from core.funding import FundingCheck
-            need = round(sum(o.amount for o in buys)
-                         * (1 + state.fee_rate + 0.005), 2)
+            from core.funding import allocate_buys
             try:
                 ref_price = max(o.price or 0 for o in buys) or market.current_price
                 available = await self.kiwoom.available_usd(
@@ -294,15 +303,11 @@ class SchedulerEngine:
                 available = None
 
             if available is not None:
-                chk = FundingCheck(need=need, available=available)
-                if not chk.ok:
-                    orders = [o for o in orders if o.side != "buy"]
-                    await self.notifier.send(
-                        f"💸 [{ticker}] 달러가 부족해 오늘 매수를 건너뜁니다.\n"
-                        f"{chk.topup_text()}\n\n"
-                        + ("  매도 주문은 그대로 접수합니다.\n" if orders else "")
-                        + f"  입금한 뒤 /run loc 로 매수만 다시 접수할 수 있습니다\n"
-                        f"  (장 시작 전까지).")
+                alloc = allocate_buys(buys, available, state.fee_rate)
+                if not alloc.all_placed:
+                    keep = {id(o) for o in alloc.placed}
+                    orders = [o for o in orders if o.side != "buy" or id(o) in keep]
+                    await self.notifier.send(self._funding_notice(ticker, alloc, orders))
                     if not orders:
                         return
 
@@ -362,6 +367,40 @@ class SchedulerEngine:
             # 원본은 실패·거부일 때만 알렸다. 잘 들어간 날은 조용해서,
             # 주문이 나갔는지 확인하려면 매번 /orders 를 쳐야 했다.
             await self.notifier.send(self._submit_report(ticker, label, placed))
+
+    @staticmethod
+    def _funding_notice(ticker: str, alloc, orders: list) -> str:
+        """달러가 모자라 일부 매수를 뺄 때의 알림"""
+        def _line(o):
+            return f"    {o.qty}주 @{o.price:.2f}  {o.tag}"
+
+        placed_buys = [o for o in alloc.placed]
+        sells_left = any(o.side == "sell" for o in orders)
+        head = ("💸" if not alloc.core_complete else "⚪")
+        L = [f"{head} [{ticker}] 달러가 부족해 매수 일부만 접수합니다"
+             if placed_buys else
+             f"💸 [{ticker}] 달러가 부족해 오늘 매수를 건너뜁니다",
+             f"  가능 ${alloc.available:,.2f} · 핵심 ${alloc.core_need:,.2f} · "
+             f"전체 ${alloc.full_need:,.2f}"]
+
+        if placed_buys:
+            L.append("")
+            L.append("  🔴 접수")
+            L += [_line(o) for o in placed_buys]
+        L.append("")
+        L.append("  ⚪ 제외")
+        L += [_line(o) for o in alloc.skipped]
+
+        L.append("")
+        if not alloc.core_complete:
+            short = max(0.0, alloc.core_need - alloc.available)
+            L.append(f"  ⚠️ 별지점·평단 매수가 빠졌습니다. 최소 ${short:,.2f} 입금 후")
+            L.append("     /run loc 로 빠진 매수만 다시 접수할 수 있습니다 (장 시작 전까지).")
+        else:
+            L.append("  ✅ 별지점·평단 매수는 모두 들어갔습니다. 폭락대비만 일부 빠짐.")
+        if sells_left:
+            L.append("  🔵 매도 주문은 그대로 접수합니다.")
+        return "\n".join(L)
 
     @staticmethod
     def _submit_report(ticker: str, label: str, placed: list) -> str:
@@ -739,17 +778,24 @@ class SchedulerEngine:
         available = await self._account_available()
         if available is None:
             return
-        needs = {}
+        needs, cores = {}, {}
         for t in self.state_mgr.list_tickers():
             st = self.state_mgr.get_state(t)
             if st is not None and not getattr(st, "halted", False):
                 needs[t] = st.next_buy_need
-        if FundingCheck(need=sum(needs.values()), available=available).ok:
+                cores[t] = _core_or_full(st)
+        chk = FundingCheck(need=sum(needs.values()), available=available,
+                           core_need=sum(cores.values()))
+        if chk.ok:
             return
+        tail = ("입금하지 않으면 별지점·평단 매수는 들어가고 폭락대비만 일부 빠집니다."
+                if chk.core_ok else
+                "입금하지 않으면 우선순위대로 들어갈 수 있는 매수만 접수합니다.\n"
+                "(별지점·평단 먼저, 폭락대비는 그다음)")
         await self.notifier.send(
             "⏰ 1시간 뒤 주문 접수 — 달러가 부족합니다.\n\n"
-            + account_summary(needs, available)
-            + "\n\n입금하지 않으면 모자란 만큼 매수를 건너뛰고 매도만 접수합니다.")
+            + account_summary(needs, available, cores)
+            + "\n\n" + tail)
 
     async def _morning_brief(self) -> None:
         """아침 요약. 어제 결과와 오늘 예정을 한 번 더 알린다."""

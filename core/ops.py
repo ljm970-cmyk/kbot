@@ -23,6 +23,12 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("kbot.ops")
+
+
+def _core_or_full(st) -> float:
+    """핵심 매수 금액. 아직 계산 전(-1)이면 전체 금액으로 대신한다."""
+    core = getattr(st, "next_core_need", -1.0)
+    return core if core >= 0 else getattr(st, "next_buy_need", 0.0)
 KST = ZoneInfo("Asia/Seoul")
 
 #: 프로세스 시작 시각. main 에서 덮어쓴다.
@@ -310,12 +316,13 @@ def morning_brief(state_mgr, registry, scheduler=None, available=None) -> str:
     # 오늘 입금 안내 — 모든 종목이 같은 달러를 쓰므로 합산해서 비교한다
     if available is not None:
         from core.funding import account_summary
-        needs = {}
+        needs, cores = {}, {}
         for t in tickers:
             st = state_mgr.get_state(t)
             if st is not None and not getattr(st, "halted", False):
                 needs[t] = getattr(st, "next_buy_need", 0.0)
-        L.append(account_summary(needs, float(available)))
+                cores[t] = _core_or_full(st)
+        L.append(account_summary(needs, float(available), cores))
         L.append("")
 
     try:

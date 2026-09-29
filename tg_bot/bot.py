@@ -55,6 +55,21 @@ class TelegramNotifier:
                 except Exception as e:
                     self._log.warning("알림 전송 실패 (%s): %s", admin_id, e)
 
+    async def send_document(self, path, caption: str = "") -> bool:
+        """관리자에게 파일을 보낸다. 한 명이라도 받았으면 True."""
+        ok = False
+        for admin_id in self.telegram.admin_ids:
+            try:
+                with open(path, "rb") as f:
+                    await self.application.bot.send_document(
+                        chat_id=admin_id, document=f,
+                        filename=str(path).rsplit("/", 1)[-1],
+                        caption=caption[:1000] if caption else None)
+                ok = True
+            except Exception as e:
+                self._log.warning("파일 전송 실패 (%s): %s", admin_id, e)
+        return ok
+
     def _split(self, text: str):
         while len(text) > self.MAX_LEN:
             cut = text.rfind("\n", 0, self.MAX_LEN)
@@ -156,6 +171,7 @@ class KbotTelegramBot:
         app.add_handler(CommandHandler("report", self._cmd_report))
         app.add_handler(CommandHandler("stats", self._cmd_stats))
         app.add_handler(CommandHandler("health", self._cmd_health))
+        app.add_handler(CommandHandler("backup", self._cmd_backup))
         app.add_handler(CommandHandler("panic", self._cmd_panic))
         app.add_handler(CallbackQueryHandler(
             self._on_panic_callback, pattern=r"^panic:"))
@@ -350,6 +366,15 @@ class KbotTelegramBot:
     # ============================================================
     # 운영 상태 · 긴급 정지
     # ============================================================
+
+    async def _cmd_backup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """장부 백업을 지금 받는다: /backup"""
+        if self.scheduler is None:
+            return await self._safe_send(update, "스케줄러가 연결되지 않아 백업할 수 없습니다.")
+        await self._safe_send(update, "💾 장부를 묶는 중입니다...")
+        ok = await self.scheduler.send_backup(reason="요청")
+        if not ok:
+            await self._safe_send(update, "⚠️ 백업 전송에 실패했습니다. 로그를 확인하세요.")
 
     async def _cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """운영 상태: /health"""
@@ -741,6 +766,8 @@ class KbotTelegramBot:
             return await self.cmd_handler.cmd_force_calc(update, context)
         elif "일정" in text or "스케줄" in text or "다음장" in text:
             return await self._cmd_next(update, context)
+        elif "백업" in text:
+            return await self._cmd_backup(update, context)
         elif "상태점검" in text or "헬스" in text:
             return await self._cmd_health(update, context)
         elif "패닉" in text or "비상" in text:
@@ -913,6 +940,7 @@ class KbotTelegramBot:
             "/unhalt 종목 — 정지 해제\n"
             "/pause, /resume — 스케줄 일시정지·재개\n\n"
             "<b>━━ 🔧 관리 ━━</b>\n"
+            "/backup — 장부 백업 파일 받기 (매주 토 09:10 자동)\n"
             "/calceod — 정산 강제 실행\n\n"
             "<b>━━ 💬 한글로도 됩니다 ━━</b>\n"
             "'상태' '주문내역' '히스토리' '통계' '일정'\n"

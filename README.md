@@ -5,6 +5,27 @@
 
 ---
 
+## 장부 백업
+
+봇 장부(`data/` — T값·평단·주문 원장)는 VM 디스크에만 있다. 매주 **토요일 09:10**
+(금요일 밤 정산이 끝난 뒤) 압축해서 텔레그램 파일로 보낸다. `/backup` 으로 언제든 받을 수 있다.
+
+- 담는 것: `state/` `config/` `orders/` `fills/` `archive/`
+- 빼는 것: 백테스트 가격 캐시, 잠금 파일, `.env` (키는 절대 넣지 않는다)
+- 원장 DB 는 SQLite 온라인 백업으로 떠서, 봇이 쓰는 도중에도 사본이 깨지지 않는다
+- 파일과 함께 그 시점 종목별 T값·보유·잔금이 한 줄씩 온다
+
+**복원** — 받은 `kbot-backup-*.tar.gz` 를 VM 홈에 올린 뒤
+
+```
+sudo systemctl stop kbot
+mv ~/kbot/data ~/kbot/data.before-restore
+tar -xzf ~/kbot-backup-*.tar.gz -C ~/kbot
+sudo systemctl start kbot
+```
+
+복원 후 `/status` 로 T값·보유를 확인하고, 증권사 잔고와 다르면 봇이 다음 정산에서 대조해 알린다.
+
 ## 배포
 
 ```

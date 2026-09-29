@@ -89,6 +89,8 @@ class SchedulerEngine:
     #: 아침 요약 발송 시각.
     #: EOD 리포트는 05:30 에 오는데 대개 자고 있어 읽히지 않는다.
     BRIEF_HOUR = 8
+    #: 주간 장부 백업. 금요일 밤 정산(토 05:30)이 끝난 뒤.
+    BACKUP_CRON = {"day_of_week": "sat", "hour": 9, "minute": 10}
     #: 토큰 갱신 주기(시간). minute 필드는 0~59 라 "*/60" 은 쓸 수 없다.
     TOKEN_REFRESH_HOURS = 1
     #: 헬스체크 주기(분)
@@ -141,6 +143,11 @@ class SchedulerEngine:
             self._morning_brief,
             CronTrigger(hour=self.BRIEF_HOUR, minute=0, timezone=KST),
             id="morning_brief", replace_existing=True, misfire_grace_time=3600,
+        )
+        self.scheduler.add_job(
+            self.send_backup, CronTrigger(timezone=KST, **self.BACKUP_CRON),
+            id="weekly_backup", replace_existing=True, misfire_grace_time=6 * 3600,
+            kwargs={"reason": "주간"},
         )
         self.scheduler.start()
         logger.info("스케줄러 시작 (KST)")
@@ -796,6 +803,27 @@ class SchedulerEngine:
             "⏰ 1시간 뒤 주문 접수 — 달러가 부족합니다.\n\n"
             + account_summary(needs, available, cores)
             + "\n\n" + tail)
+
+    async def send_backup(self, reason: str = "주간") -> bool:
+        """장부(data/)를 묶어 텔레그램 파일로 보낸다. 성공하면 True."""
+        from core.backup import make_backup
+        sender = getattr(self.notifier, "send_document", None)
+        if sender is None:
+            logger.warning("파일을 보낼 수 없는 알림 채널이라 백업을 건너뜁니다")
+            return False
+        try:
+            res = make_backup(self.state_mgr.data_dir)
+        except Exception as e:
+            logger.exception("장부 백업 생성 실패")
+            await self.notifier.send(f"⚠️ 장부 백업을 만들지 못했습니다: {e}")
+            return False
+        try:
+            ok = await sender(res.path, f"[{reason}] " + res.caption())
+            if ok:
+                logger.info("장부 백업 전송 (%s, %d파일, %dB)", reason, res.files, res.size)
+            return ok
+        finally:
+            res.path.unlink(missing_ok=True)
 
     async def _morning_brief(self) -> None:
         """아침 요약. 어제 결과와 오늘 예정을 한 번 더 알린다."""

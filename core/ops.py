@@ -288,6 +288,9 @@ def morning_brief(state_mgr, registry, scheduler=None, available=None) -> str:
         L.append(f"{'⛔' if halted else '💎'} [{t}]{flag}")
         L.append(f"  📈 T {st.T:.4f} · {st.holdings}주 @${st.avg_price:.2f} "
                  f"· 💵 잔금 ${st.cash:,.2f}")
+        if st.holdings > 0 or st.T > 0:
+            from core.tchart import t_chart_lines
+            L += [f"  {line}" for line in t_chart_lines(state_mgr, t, st)]
 
         last = getattr(st, "last_eod_date", "")
         if last:

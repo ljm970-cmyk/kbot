@@ -116,7 +116,7 @@ class KbotTelegramBot:
         self.cmd_handler = CommandsHandler(state_manager, kiwoom_api, config)
         # 주문 내역에서 봇 주문과 직접 주문을 구분하려면 원장이 필요하다
         self.cmd_handler.registry = getattr(scheduler, "registry", None)
-        self.setup_wizard = SetupWizard(state_manager)
+        self.setup_wizard = SetupWizard(state_manager, on_complete=self.cmd_handler.cmd_status)
         
         # Application 빌드
         self.application = Application.builder().token(

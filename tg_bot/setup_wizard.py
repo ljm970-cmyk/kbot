@@ -7,6 +7,7 @@ ConversationHandler 기반 초기 설정 마법사
 """
 
 import html
+import logging
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -22,6 +23,8 @@ from telegram.ext import (
     CONFIRM
 ) = range(6)
 
+logger = logging.getLogger(__name__)
+
 
 class SetupWizard:
     """
@@ -32,8 +35,10 @@ class SetupWizard:
     - 수수료 직접 입력 (0.07% 등)
     """
     
-    def __init__(self, state_manager):
+    def __init__(self, state_manager, on_complete=None):
         self.state = state_manager
+        # 설정이 끝나면 부를 함수 (관제탑 표시). bot.py 가 넣어 준다.
+        self.on_complete = on_complete
     
     def get_handler(self) -> ConversationHandler:
         return ConversationHandler(
@@ -405,9 +410,18 @@ class SetupWizard:
         lines.append("")
         lines.append("관제탑을 불러옵니다...")
         await query.edit_message_text("\n".join(lines))
-        
-        # 관제탑으로 이동 (bot.py에서 처리)
-        context.user_data['setup_complete'] = True
+
+        # 이어서 관제탑을 띄운다. 실패해도 설정은 이미 저장됐다.
+        shown = False
+        if self.on_complete is not None:
+            try:
+                await self.on_complete(update, context)
+                shown = True
+            except Exception:
+                logger.exception("설정 후 관제탑 표시 실패")
+        if not shown:
+            await update.effective_message.reply_text(
+                "관제탑을 바로 띄우지 못했습니다. /status 로 확인하세요.")
         return ConversationHandler.END
     
     async def cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

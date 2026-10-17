@@ -350,6 +350,51 @@ def test_account_level_available_used():
 
 # ================================================================
 
+
+# ================================================================
+# 설정 완료 후 관제탑 자동 표시
+# ================================================================
+
+def _confirm_ctx():
+    ctx = _Ctx()
+    ctx.user_data.update({
+        "user_id": "1", "adding": True,
+        "tickers_config": [{"ticker": "TQQQ", "division": 40, "principal": 20000.0,
+                            "fee_rate": 0.0007, "fee_display": 0.07}],
+    })
+    return ctx
+
+
+def test_confirm_shows_status_automatically():
+    """원본은 '관제탑을 불러옵니다...' 만 띄우고 실제로는 아무것도 안 했다"""
+    wiz, sm = _wizard([SOXL])
+    calls = []
+
+    async def status(update, context):
+        calls.append(update)
+    wiz.on_complete = status
+    asyncio.run(wiz.on_confirm(_Update(data="CONFIRM"), _confirm_ctx()))
+    assert len(calls) == 1
+    assert "TQQQ" in sm.list_tickers()      # 저장은 관제탑보다 먼저
+
+
+def test_confirm_status_failure_falls_back_to_hint():
+    wiz, sm = _wizard([SOXL])
+
+    async def broken(update, context):
+        raise RuntimeError("API 오류")
+    wiz.on_complete = broken
+    u = _Update(data="CONFIRM")
+    asyncio.run(wiz.on_confirm(u, _confirm_ctx()))
+    assert any("/status" in t for t, _ in u.effective_message.sent)
+    assert "TQQQ" in sm.list_tickers()
+
+
+def test_bot_wires_status_into_wizard():
+    src = (Path(__file__).resolve().parent.parent / "tg_bot" / "bot.py").read_text(encoding="utf-8")
+    assert "SetupWizard(state_manager, on_complete=self.cmd_handler.cmd_status)" in src
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

@@ -116,3 +116,15 @@ def t_chart_lines(state_mgr, ticker: str, state) -> list[str]:
     if flow:
         lines.append(flow)
     return lines
+
+
+def t_values_between(state_mgr, ticker: str, start: str, end: str) -> list[float]:
+    """start~end(YYYYMMDD) 거래일의 T 값. 같은 날은 나중 기록."""
+    from eod.stats import _months
+    by_day: dict[str, float] = {}
+    for ym in _months(start[:6], end[:6]):
+        for rec in state_mgr.read_archive(ym, ticker):
+            d = str(rec.get("trade_date", ""))
+            if start <= d <= end:
+                by_day[d] = float(rec.get("T", 0.0) or 0.0)
+    return [by_day[d] for d in sorted(by_day)]

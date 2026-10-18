@@ -16,6 +16,7 @@
 빼는 것
   backtest/ 가격 캐시 (다시 받으면 된다)
   locks/    잠금 파일
+  run/      생존 신호 (실행 중 상태)
   .env      키 — 백업에 절대 넣지 않는다 (data/ 밖에 있다)
 
 SQLite 원장은 봇이 쓰는 도중에 파일을 그대로 복사하면 깨질 수 있다.
@@ -44,7 +45,7 @@ from zoneinfo import ZoneInfo
 KST = ZoneInfo("Asia/Seoul")
 
 #: data/ 아래에서 백업하지 않는 최상위 폴더
-EXCLUDE_DIRS = frozenset({"backtest", "locks"})
+EXCLUDE_DIRS = frozenset({"backtest", "locks", "run"})
 #: SQLite 보조 파일 — 온라인 백업 사본에 이미 반영된다
 SKIP_SUFFIXES = ("-wal", "-shm", "-journal")
 

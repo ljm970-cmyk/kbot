@@ -139,6 +139,18 @@ class CommandsHandler:
                 f"├ 📦 보유: <code>{st['holdings']}</code>주\n"
                 f"├ 💵 잔금: <code>{st['cash']:,.2f}</code>\n"
             )
+
+            # T 진행 막대와 이번 사이클 T 흐름 (아침 요약과 같은 그림)
+            if st['holdings'] > 0 or st['T'] > 0:
+                try:
+                    from types import SimpleNamespace
+                    from core.tchart import t_chart_lines
+                    view = SimpleNamespace(T=st['T'], division=st['division'],
+                                           mode=st['mode'], holdings=st['holdings'])
+                    for line in t_chart_lines(self.state, ticker, view):
+                        report += f"├ {html.escape(line)}\n"
+                except Exception:
+                    logger.exception("[%s] T 그래프 생성 실패", ticker)
             
             # 별지점
             #

@@ -598,6 +598,24 @@ def test_star_point_attribute_name():
 
 # ================================================================
 
+def test_status_shows_t_graph():
+    """아침 요약과 같은 T 진행 막대·흐름이 관제탑에도 나온다"""
+    m = _mgr()
+    st = m.get_state(USER, "TQQQ")
+    st.T, st.holdings, st.avg_price, st.cash = 3.0, 9, 100.0, 19000.0
+    m.save_state(st)
+    for d, t in [("20261019", 1.0), ("20261020", 2.0), ("20261021", 3.0)]:
+        m.archive_eod("TQQQ", d, {"T": t, "holdings": int(t * 3), "avg_price": 100.0})
+    body = _run_status(m)[-1]
+    assert "▰" in body and "┃" in body and "전반전" in body
+    assert "T 흐름" in body
+
+
+def test_status_no_graph_between_cycles():
+    body = _run_status(_mgr())[-1]
+    assert "┃" not in body and "T 흐름" not in body
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

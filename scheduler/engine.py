@@ -91,6 +91,8 @@ class SchedulerEngine:
     BRIEF_HOUR = 8
     #: 주간 장부 백업. 금요일 밤 정산(토 05:30)이 끝난 뒤.
     BACKUP_CRON = {"day_of_week": "sat", "hour": 9, "minute": 10}
+    #: 주간 성과 요약. 백업 바로 앞.
+    WEEKLY_CRON = {"day_of_week": "sat", "hour": 9, "minute": 5}
     #: 토큰 갱신 주기(시간). minute 필드는 0~59 라 "*/60" 은 쓸 수 없다.
     TOKEN_REFRESH_HOURS = 1
     #: 헬스체크 주기(분)
@@ -145,11 +147,21 @@ class SchedulerEngine:
             id="morning_brief", replace_existing=True, misfire_grace_time=3600,
         )
         self.scheduler.add_job(
+            self.send_weekly, CronTrigger(timezone=KST, **self.WEEKLY_CRON),
+            id="weekly_report", replace_existing=True, misfire_grace_time=6 * 3600,
+        )
+        self.scheduler.add_job(
             self.send_backup, CronTrigger(timezone=KST, **self.BACKUP_CRON),
             id="weekly_backup", replace_existing=True, misfire_grace_time=6 * 3600,
             kwargs={"reason": "주간"},
         )
+        # 생존 신호 — 봇과 따로 도는 감시(ops/watchdog.py)가 읽는다
+        self.scheduler.add_job(
+            self._heartbeat, CronTrigger(minute="*", timezone=KST),
+            id="heartbeat", replace_existing=True, misfire_grace_time=30,
+        )
         self.scheduler.start()
+        self._write_heartbeat()
         logger.info("스케줄러 시작 (KST)")
         # 기동 직후 한 번 계산해 둔다
         asyncio.create_task(self.plan_day())
@@ -234,17 +246,60 @@ class SchedulerEngine:
 
     async def _submit(self, session: date, window: str, label: str) -> None:
         trade_date = session.strftime("%Y%m%d")
-        for ticker in self.state_mgr.list_tickers():
+        tickers = self.state_mgr.list_tickers()
+
+        # 두 종목 이상이면 달러를 나눠 쓴다.
+        #
+        # 종목을 차례로 접수하므로 앞 종목이 폭락대비까지 걸면 뒤 종목의
+        # 별지점·평단 매수가 빠질 수 있다. 뒤 종목들의 핵심 매수 몫을
+        # 남겨두고, 앞 종목이 실제로 묶은 만큼 예산에서 뺀다.
+        budget = None
+        if window == SubmitWindow.REGULAR and len(tickers) > 1:
+            budget = await self._account_available()
+
+        for i, ticker in enumerate(tickers):
             try:
-                await self._submit_ticker(ticker, trade_date, window, label)
+                reserve = 0.0
+                if budget is not None:
+                    try:
+                        reserve = self._core_reserve(tickers[i + 1:])
+                    except Exception:
+                        logger.exception("다른 종목 핵심 매수 몫 계산 실패 — 예약 없이 진행")
+                # 첫 종목은 아직 쓴 돈이 없으니 증권사 금액 그대로 쓴다.
+                # (예산 조회 기준가가 달라 한 주 차이로 핵심 매수가 빠지는 일을 막는다)
+                spent = await self._submit_ticker(
+                    ticker, trade_date, window, label, aux_reserve=reserve,
+                    budget=budget if (budget is not None and i > 0) else None)
+                if budget is not None:
+                    budget -= spent or 0.0
             except Exception as e:
                 logger.exception("%s %s 접수 실패", ticker, label)
                 await self.notifier.send(f"⚠ [{ticker}] {label} 접수 실패: {e}")
 
-    async def _submit_ticker(self, ticker: str, trade_date: str, window: str, label: str) -> None:
+    def _core_reserve(self, tickers: list) -> float:
+        """뒤에 접수할 종목들의 핵심 매수 예상 금액 (정지 종목 제외)"""
+        total = 0.0
+        for t in tickers:
+            st = self.state_mgr.get_state(t)
+            if st is None or CircuitBreaker.is_halted(st):
+                continue
+            total += max(0.0, _core_or_full(st))
+        return round(total, 2)
+
+    async def _submit_ticker(self, ticker: str, trade_date: str, window: str, label: str,
+                             aux_reserve: float = 0.0,
+                             budget: float | None = None) -> float:
+        """한 종목 접수. 접수한 매수 주문이 묶는 달러를 돌려준다.
+
+        aux_reserve  뒤에 접수할 다른 종목의 핵심 매수 몫. 이 종목의
+                     폭락대비는 이 금액을 건드리지 못한다.
+        budget       이번 접수에서 이 종목이 쓸 수 있는 최대 달러. 앞 종목이
+                     쓴 만큼 줄어 있다. 증권사 주문가능금액이 아직 앞 종목
+                     주문을 반영하지 못했어도 겹쳐 쓰지 않게 한다.
+        """
         state = self.state_mgr.get_state(ticker)
         if state is None:
-            return
+            return 0.0
 
         # 회로차단기 — 장부가 어긋난 상태로는 주문을 내지 않는다
         if CircuitBreaker.is_halted(state):
@@ -256,7 +311,7 @@ class SchedulerEngine:
                     f"  사유: {state.halt_reason}\n"
                     f"  확인 후 /unhalt {ticker} 로 해제하세요."
                 )
-            return
+            return 0.0
 
         market = await self._market_snapshot(ticker, state.mode)
         mode = ReverseMode(state) if state.mode == "reverse" else NormalMode(state)
@@ -264,7 +319,7 @@ class SchedulerEngine:
 
         orders = self._orders_for_window(plan, window)
         if not orders:
-            return
+            return 0.0
 
         if plan.warnings and window == SubmitWindow.PRE_MARKET:
             await self.notifier.send(f"[{ticker}] " + "\n".join(plan.warnings))
@@ -290,7 +345,7 @@ class SchedulerEngine:
             if not orders:
                 await self.notifier.send(
                     f"ℹ️ [{ticker}] {label} 는 모두 이미 접수돼 있어 건너뛰었습니다.")
-                return
+                return 0.0
 
         # 자금 점검 — 매수만 해당. 매도는 돈이 없어도 낸다.
         #
@@ -309,20 +364,25 @@ class SchedulerEngine:
                 logger.warning("[%s] 매수 가능 금액 확인 실패: %s", ticker, e)
                 available = None
 
+            if budget is not None:
+                # 증권사 조회가 실패해도 예산이 있으면 그 안에서 배분한다
+                available = (max(0.0, budget) if available is None
+                             else min(available, max(0.0, budget)))
             if available is not None:
-                alloc = allocate_buys(buys, available, state.fee_rate)
+                alloc = allocate_buys(buys, available, state.fee_rate,
+                                      aux_reserve=aux_reserve)
                 if not alloc.all_placed:
                     keep = {id(o) for o in alloc.placed}
                     orders = [o for o in orders if o.side != "buy" or id(o) in keep]
                     await self.notifier.send(self._funding_notice(ticker, alloc, orders))
                     if not orders:
-                        return
+                        return 0.0
 
         if self.config.dry_run:
             lines = "\n".join(f"  {o}" for o in orders)
             await self.notifier.send(
                 f"[DRY RUN] {ticker} {label}\n{plan.summary().splitlines()[0]}\n{lines}")
-            return
+            return 0.0
 
         exchange = exchange_of(ticker)
         submitted = 0
@@ -352,7 +412,7 @@ class SchedulerEngine:
                     f"  증권사 앱에서 실제 주문을 확인하세요.\n"
                     f"  이후 주문은 정지했습니다. /unhalt {ticker} 로 해제합니다."
                 )
-                return
+                return self._buy_cost(placed, state.fee_rate)
             except KiwoomAPIError as e:
                 self.registry.set_status(record_id, "rejected", str(e))
                 await self.notifier.send(f"⛔ [{ticker}] {order} 접수 거부: {e.message}")
@@ -374,6 +434,12 @@ class SchedulerEngine:
             # 원본은 실패·거부일 때만 알렸다. 잘 들어간 날은 조용해서,
             # 주문이 나갔는지 확인하려면 매번 /orders 를 쳐야 했다.
             await self.notifier.send(self._submit_report(ticker, label, placed))
+        return self._buy_cost(placed, state.fee_rate)
+
+    @staticmethod
+    def _buy_cost(orders: list, fee_rate: float) -> float:
+        from core.funding import order_cost
+        return round(sum(order_cost(o, fee_rate) for o in orders if o.side == "buy"), 2)
 
     @staticmethod
     def _funding_notice(ticker: str, alloc, orders: list) -> str:
@@ -405,6 +471,8 @@ class SchedulerEngine:
             L.append("     /run loc 로 빠진 매수만 다시 접수할 수 있습니다 (장 시작 전까지).")
         else:
             L.append("  ✅ 별지점·평단 매수는 모두 들어갔습니다. 폭락대비만 일부 빠짐.")
+            if getattr(alloc, "aux_reserve", 0) > 0:
+                L.append(f"  🔒 다른 종목 별지점·평단 몫 ${alloc.aux_reserve:,.2f} 는 남겨뒀습니다.")
         if sells_left:
             L.append("  🔵 매도 주문은 그대로 접수합니다.")
         return "\n".join(L)
@@ -617,6 +685,9 @@ class SchedulerEngine:
                 "avg_price": state.avg_price, "cash": state.cash,
                 "mode": state.mode, "close": close_price,
                 "fills": result.fills_applied, "realized_pl": result.realized_pl,
+                # 빠져 있어 /stats 가 사이클 종료를 몰랐다 (모든 사이클이 하나로 합쳐짐)
+                "cycle_closed": bool(result.cycle_closed),
+                "division": state.division, "principal": state.principal,
             })
             CircuitBreaker.record_eod_success(state)
             try:
@@ -627,6 +698,13 @@ class SchedulerEngine:
             report = daily_report(state, self.registry, result, stats=stats)
 
         await self.notifier.send(report)
+
+        # 사이클이 끝난 날은 결산을 따로 보낸다
+        if result.cycle_closed and stats is not None and stats.cycles:
+            try:
+                await self.notifier.send(self._cycle_end_text(ticker, stats, state))
+            except Exception:
+                logger.exception("[%s] 사이클 결산 전송 실패", ticker)
 
         # 장부 대조 — 어긋나면 다음 거래일 주문을 멈춘다
         await self._reconcile_ticker(ticker, exchange, result)
@@ -804,6 +882,16 @@ class SchedulerEngine:
             + account_summary(needs, available, cores)
             + "\n\n" + tail)
 
+    async def send_weekly(self, today: Optional[date] = None) -> None:
+        """주간 성과 요약"""
+        from core.weekly import weekly_report
+        try:
+            await self.notifier.send(weekly_report(
+                self.state_mgr, self.registry, today or datetime.now(KST).date()))
+        except Exception as e:
+            logger.exception("주간 요약 생성 실패")
+            await self.notifier.send(f"⚠️ 주간 요약 생성 실패: {e}")
+
     async def send_backup(self, reason: str = "주간") -> bool:
         """장부(data/)를 묶어 텔레그램 파일로 보낸다. 성공하면 True."""
         from core.backup import make_backup
@@ -835,6 +923,30 @@ class SchedulerEngine:
         except Exception as e:
             logger.exception("아침 요약 생성 실패")
             await self.notifier.send(f"⚠️ 아침 요약 생성 실패: {e}")
+
+    def _cycle_end_text(self, ticker: str, stats, state) -> str:
+        from core.tchart import t_values_between
+        from eod.stats import format_cycle_end
+        c = stats.cycles[-1]
+        try:
+            tv = t_values_between(self.state_mgr, ticker, c.start_date, c.end_date)
+            tv = tv[:-1] if len(tv) > 1 and tv[-1] == 0 else tv    # 마지막 날은 T 0
+        except Exception:
+            tv = []
+        return format_cycle_end(stats, principal=state.principal,
+                                division=state.division, t_values=tv)
+
+    async def _heartbeat(self) -> None:
+        # async 로 둔다. 동기 함수면 APScheduler 가 별도 스레드에서 돌려,
+        # 이벤트 루프가 멈춰도 신호가 계속 나간다.
+        self._write_heartbeat()
+
+    def _write_heartbeat(self) -> None:
+        from core.heartbeat import write_heartbeat
+        try:
+            write_heartbeat(self.state_mgr.data_dir)
+        except Exception as e:
+            logger.warning("생존 신호 기록 실패: %s", e)
 
     async def _health_check(self) -> None:
         try:

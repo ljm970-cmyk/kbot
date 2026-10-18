@@ -97,6 +97,7 @@ class BuyAllocation:
     core_need: float = 0.0
     full_need: float = 0.0
     available: float = 0.0
+    aux_reserve: float = 0.0      # 다른 종목 핵심 매수 몫으로 남겨둔 금액
 
     @property
     def core_complete(self) -> bool:
@@ -107,7 +108,8 @@ class BuyAllocation:
         return not self.skipped
 
 
-def allocate_buys(buys, available: float, fee_rate: float) -> BuyAllocation:
+def allocate_buys(buys, available: float, fee_rate: float,
+                  aux_reserve: float = 0.0) -> BuyAllocation:
     """가진 달러 안에서 우선순위대로 매수 주문을 고른다.
 
     1순위 핵심 매수(T 를 움직이는 주문)를 가격이 높은 것부터 담는다.
@@ -121,6 +123,10 @@ def allocate_buys(buys, available: float, fee_rate: float) -> BuyAllocation:
 
     주문 수량은 쪼개지 않는다. 절반 수량으로 바꾸면 T 반영(+1/+0.5)과
     계획의 뜻이 달라진다.
+
+    aux_reserve: 폭락대비가 건드리면 안 되는 금액. 두 종목을 운용할 때
+    뒤에 접수할 종목의 핵심 매수 몫을 남겨둔다. 앞 종목의 폭락대비가
+    달러를 다 묶어 뒤 종목의 별지점·평단 매수가 빠지는 일을 막는다.
     """
     core = sorted((o for o in buys if is_core_buy(o)),
                   key=lambda o: -(o.price or 0))
@@ -145,9 +151,10 @@ def allocate_buys(buys, available: float, fee_rate: float) -> BuyAllocation:
     # 모두 뺀다. 125 는 빼고 100 만 걸면, 종가가 100 아래로 내려간 날 125 도
     # 체결됐어야 할 가격인데 빠져 있어 사다리가 뒤집힌다.
     blocked = not res.core_complete
+    res.aux_reserve = max(0.0, aux_reserve)
     for o in aux:
         c = order_cost(o, fee_rate)
-        if not blocked and c <= left + 1e-9:
+        if not blocked and c <= left - res.aux_reserve + 1e-9:
             res.placed.append(o)
             left -= c
         else:

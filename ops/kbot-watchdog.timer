@@ -1,0 +1,11 @@
+[Unit]
+Description=kbot 생존 감시 — 2분마다
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

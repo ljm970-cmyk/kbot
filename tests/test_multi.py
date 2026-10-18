@@ -339,7 +339,7 @@ def test_first_ticker_funded_second_skipped_when_cash_runs_out():
 
 def test_scheduler_iterates_all_active_tickers():
     src = (ROOT / "scheduler" / "engine.py").read_text(encoding="utf-8")
-    assert src.count("for ticker in self.state_mgr.list_tickers()") >= 3
+    assert src.count("self.state_mgr.list_tickers()") >= 4
 
 
 def test_account_level_available_used():

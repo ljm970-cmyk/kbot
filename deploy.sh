@@ -15,6 +15,9 @@
 #     옛 zip 을 다시 풀었던 사고가 다시 나지 않게.
 #   - 재시작 뒤 로그에서 실계좌 / 모의투자 / DRY RUN 표시를 직접 보여준다.
 # ================================================================
+# 이 스크립트도 zip 안에 있어 반영 중에 자기 자신을 덮어쓴다. bash 는
+# 스크립트를 읽어 가며 실행하므로, 전부를 함수로 감싸 먼저 다 읽게 한다.
+main() {
 set -euo pipefail
 cd "$(dirname "$0")"
 HOME_DIR="$(pwd)"
@@ -117,6 +120,8 @@ esac
 ERRS=$(sudo journalctl -u "$SERVICE" --since "$SINCE" --no-pager | grep -cE "Traceback|\[ERROR\]" || true)
 [ "$ERRS" -gt 0 ] && red "  기동 로그에 오류 $ERRS 건 — sudo journalctl -u $SERVICE --since \"$SINCE\""
 
+[ -x "$HOME_DIR/ops/install_watchdog.sh" ] && "$HOME_DIR/ops/install_watchdog.sh" || true
+
 # ----------------------------------------------------------------
 step "6. 커밋"
 # ----------------------------------------------------------------
@@ -136,3 +141,6 @@ fi
 
 green "
 배포 완료 — $(git log --oneline -1)"
+}
+main "$@"
+exit $?

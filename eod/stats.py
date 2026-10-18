@@ -106,10 +106,13 @@ def collect(state_mgr, ticker: str, months: Optional[list[str]] = None) -> Stats
         start = datetime(now.year - 1, now.month, 1).strftime("%Y%m")
         months = _months(start, now.strftime("%Y%m"))
 
-    rows = []
+    # 같은 날 정산을 다시 돌리면 두 줄이 남는다. 나중 것만 쓴다.
+    by_day: dict[str, dict] = {}
     for m in months:
-        rows.extend(state_mgr.read_archive(m, ticker))
-    rows.sort(key=lambda r: r.get("trade_date", ""))
+        for r in state_mgr.read_archive(m, ticker):
+            if r.get("trade_date"):
+                by_day[r["trade_date"]] = r
+    rows = [by_day[d] for d in sorted(by_day)]
 
     stats = Stats(ticker=ticker)
     idx = 1
@@ -135,7 +138,11 @@ def collect(state_mgr, ticker: str, months: Optional[list[str]] = None) -> Stats
         if r.get("mode") == "reverse":
             cur["reverse_days"] += 1
 
-        if r.get("cycle_closed"):
+        # 예전 아카이브에는 cycle_closed 가 없다. 보유가 있다가 0 이 되면 종료로 본다.
+        closed = r.get("cycle_closed")
+        if closed is None:
+            closed = cur["max_holdings"] > 0 and int(r.get("holdings", 0) or 0) <= 0
+        if closed:
             stats.cycles.append(Cycle(
                 index=idx, start_date=cur["start_date"], end_date=r["trade_date"],
                 days=cur["days"], start_cash=cur["start_cash"], end_cash=r.get("cash", 0.0),
@@ -208,3 +215,42 @@ def cycle_pnl_line(state, stats: Stats) -> str:
     unreal = state.holdings * state.avg_price
     return (f"  사이클 #{c.index} {c.days}거래일차 · "
             f"투입 ${unreal:,.2f} · 누적손익 ${stats.total_pnl:+,.2f}")
+
+
+def _md(d: str) -> str:
+    return f"{int(d[4:6])}/{int(d[6:8])}" if len(d) == 8 and d.isdigit() else d
+
+
+def format_cycle_end(stats: Stats, principal: float = 0.0, division: int = 0,
+                     t_values: Optional[list] = None) -> str:
+    """사이클이 끝난 날 따로 보내는 결산 한 장"""
+    if not stats.cycles:
+        return ""
+    c = stats.cycles[-1]
+    base = principal or c.start_cash
+    pct = (c.pnl / base * 100) if base else 0.0
+    mark = "🎉" if c.pnl > 0 else "🥶"
+    L = [f"🏁 [{stats.ticker}] 사이클 #{c.index} 완료 {mark}", ""]
+    L.append(f"  📅 기간     {_md(c.start_date)} ~ {_md(c.end_date)} · {c.days}거래일")
+    t_line = f"  📈 최대 T   {c.max_T:.1f}"
+    if division:
+        t_line += f" / {division}"
+        if c.max_T >= division / 2:
+            t_line += " (후반전 진입)"
+    L.append(t_line)
+    L.append(f"  📦 최대 보유 {c.max_holdings}주"
+             + (f" · 리버스 {c.reverse_days}일" if c.reverse_days else ""))
+    if t_values and len(t_values) >= 2:
+        from core.tchart import sparkline
+        L.append(f"  〰️ T 흐름  {sparkline(list(t_values))}")
+    L.append("")
+    L.append(f"  💰 사이클 손익  ${c.pnl:+,.2f} ({pct:+.2f}%"
+             + (" · 원금 대비)" if principal else ")"))
+    if c.days:
+        L.append(f"     거래일당   ${c.pnl / c.days:+,.2f}")
+    L.append("")
+    L.append(f"  🔁 누적 {stats.closed}회 · 승 {stats.wins} / 패 {stats.closed - stats.wins}"
+             f" · 누적 손익 ${stats.total_pnl:+,.2f}")
+    L.append("")
+    L.append("  다음 거래일 첫 매수부터 새 사이클을 시작합니다. 전체 이력은 /stats")
+    return "\n".join(L)

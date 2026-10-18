@@ -172,6 +172,7 @@ class KbotTelegramBot:
         app.add_handler(CommandHandler("stats", self._cmd_stats))
         app.add_handler(CommandHandler("health", self._cmd_health))
         app.add_handler(CommandHandler("backup", self._cmd_backup))
+        app.add_handler(CommandHandler("weekly", self._cmd_weekly))
         app.add_handler(CommandHandler("panic", self._cmd_panic))
         app.add_handler(CallbackQueryHandler(
             self._on_panic_callback, pattern=r"^panic:"))
@@ -366,6 +367,16 @@ class KbotTelegramBot:
     # ============================================================
     # 운영 상태 · 긴급 정지
     # ============================================================
+
+    async def _cmd_weekly(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """주간 요약을 지금 받는다: /weekly (지난 7일)"""
+        from core.weekly import weekly_report
+        try:
+            text = weekly_report(self.state, getattr(self.scheduler, "registry", None))
+        except Exception as e:
+            logger.exception("주간 요약 실패")
+            text = f"⚠️ 주간 요약 생성 실패: {e}"
+        await self._safe_send(update, text)
 
     async def _cmd_backup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """장부 백업을 지금 받는다: /backup"""
@@ -768,6 +779,8 @@ class KbotTelegramBot:
             return await self._cmd_next(update, context)
         elif "백업" in text:
             return await self._cmd_backup(update, context)
+        elif "주간" in text:
+            return await self._cmd_weekly(update, context)
         elif "상태점검" in text or "헬스" in text:
             return await self._cmd_health(update, context)
         elif "패닉" in text or "비상" in text:
@@ -920,6 +933,7 @@ class KbotTelegramBot:
             "/health — 운영 상태 (토큰·체결수신·정지)\n"
             "/report [종목] — 일자별 매매 이력\n"
             "/stats [종목] — 누적 성과 (사이클·승률·손익)\n"
+            "/weekly — 지난 7일 요약 (매주 토 09:05 자동)\n"
             "/next — 다음 거래일 일정\n\n"
             "<b>━━ 📤 수동 실행 /run ━━</b>\n"
             "/run loc — LOC 매수·쿼터매도 접수\n"
@@ -943,7 +957,7 @@ class KbotTelegramBot:
             "/backup — 장부 백업 파일 받기 (매주 토 09:10 자동)\n"
             "/calceod — 정산 강제 실행\n\n"
             "<b>━━ 💬 한글로도 됩니다 ━━</b>\n"
-            "'상태' '주문내역' '히스토리' '통계' '일정'\n"
+            "'상태' '주문내역' '히스토리' '통계' '주간' '일정'\n"
             "'보정' '설정' '패닉' '긴급정지' '정지해제'"
         )
         await update.effective_message.reply_text(msg, parse_mode='HTML')

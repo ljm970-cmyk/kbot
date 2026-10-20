@@ -433,7 +433,8 @@ class SchedulerEngine:
             #
             # 원본은 실패·거부일 때만 알렸다. 잘 들어간 날은 조용해서,
             # 주문이 나갔는지 확인하려면 매번 /orders 를 쳐야 했다.
-            await self.notifier.send(self._submit_report(ticker, label, placed))
+            await self.notifier.send(self._submit_report(
+                ticker, label, placed, star=self._star_line(plan, state)))
         return self._buy_cost(placed, state.fee_rate)
 
     @staticmethod
@@ -478,11 +479,34 @@ class SchedulerEngine:
         return "\n".join(L)
 
     @staticmethod
-    def _submit_report(ticker: str, label: str, placed: list) -> str:
+    def _star_line(plan, state) -> str:
+        """⭐ 별지점 $80.71 · 별% +14.25% (평단 $70.64 · T 2.00)"""
+        star = getattr(plan, "star_point", None)
+        avg = getattr(state, "avg_price", 0.0) or 0.0
+        if not star:
+            return ""
+        name = "별지점(MA5)" if getattr(plan, "mode", "") == "reverse" else "별지점"
+        if avg <= 0:
+            return f"  ⭐ {name} ${star:.2f}"
+        pct = (star / avg - 1) * 100
+        if getattr(plan, "mode", "") != "reverse":
+            # 일반모드는 방법론 공식값(가격 반올림 전)을 보여준다
+            try:
+                from core.star_point import star_pct
+                pct = star_pct(plan.ticker, state.division, plan.T)
+            except Exception:
+                pass
+        return (f"  ⭐ {name} ${star:.2f} · 별% {pct:+.2f}%"
+                f" (평단 ${avg:.2f} · T {plan.T:.2f})")
+
+    @staticmethod
+    def _submit_report(ticker: str, label: str, placed: list, star: str = "") -> str:
         """접수 결과 요약"""
         buys = [o for o in placed if o.side == "buy"]
         sells = [o for o in placed if o.side == "sell"]
         L = [f"📤 [{ticker}] {label} · {len(placed)}건"]
+        if star:
+            L.append(star)
 
         for group, mark, name in ((sells, "🔵", "매도"), (buys, "🔴", "매수")):
             if not group:

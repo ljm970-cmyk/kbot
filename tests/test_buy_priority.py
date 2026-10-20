@@ -311,6 +311,28 @@ def test_engine_all_fit_is_quiet_about_funding():
 
 # ================================================================
 
+def test_submit_report_shows_star_percent():
+    """접수 알림 맨 위에 별지점과 별% 를 보여준다"""
+    from core.star_point import star_pct
+    eng, placed, sent = _engine(available=100_000.0)
+    _run(eng)
+    rep = next(s for s in sent if s.startswith("📤 [SOXL]"))
+    line = rep.splitlines()[1]
+    assert "⭐ 별지점 $" in line
+    assert f"별% {star_pct('SOXL', 40, 2.0):+.2f}%" in line
+    assert "평단 $149.10" in line and "T 2.00" in line
+
+
+def test_star_line_reverse_and_empty():
+    from scheduler.engine import SchedulerEngine
+    st = PositionState(ticker="SOXL", division=40, principal=20000.0, fee_rate=FEE,
+                       T=39.5, holdings=150, avg_price=130.0, cash=100.0)
+    rev = type("P", (), {"star_point": 117.0, "mode": "reverse", "T": 39.5, "ticker": "SOXL"})()
+    assert "별지점(MA5) $117.00 · 별% -10.00%" in SchedulerEngine._star_line(rev, st)
+    none = type("P", (), {"star_point": None, "mode": "normal", "T": 0.0, "ticker": "SOXL"})()
+    assert SchedulerEngine._star_line(none, st) == ""
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

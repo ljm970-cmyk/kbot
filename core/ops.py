@@ -291,6 +291,10 @@ def morning_brief(state_mgr, registry, scheduler=None, available=None) -> str:
         if st.holdings > 0 or st.T > 0:
             from core.tchart import t_chart_lines
             L += [f"  {line}" for line in t_chart_lines(state_mgr, t, st)]
+            from core.reverse_guard import approach_text
+            near = approach_text(st)
+            if near:
+                L.append(f"  {near}")
 
         last = getattr(st, "last_eod_date", "")
         if last:

@@ -218,6 +218,81 @@ def test_backup_skips_run_dir():
 
 
 # ================================================================
+# 외부 감시 (healthchecks)
+# ================================================================
+
+def _hc_env(d: Path) -> Path:
+    p = d / ".env"
+    p.write_text("TELEGRAM_BOT_TOKEN=abc\nTELEGRAM_ADMIN_ID=1\n"
+                 "HEALTHCHECK_URL=https://hc-ping.com/abc/\n", encoding="utf-8")
+    return p
+
+
+def _hc_run(data, env, box, pings, now):
+    return wd.run_once(data, env, now=now, active_fn=box.act, send_fn=box.send,
+                       ping_fn=lambda url, fail=False, body="": pings.append((url, fail, body)) or True)
+
+
+def test_healthy_pings_success():
+    data, _ = _setup()
+    env = _hc_env(data.parent)
+    pings = []
+    _hc_run(data, env, _Box(), pings, T0 + timedelta(minutes=1))
+    assert pings == [("https://hc-ping.com/abc/", False, "")]
+
+
+def test_no_ping_during_grace_then_fail_with_alert():
+    data, _ = _setup()
+    env = _hc_env(data.parent)
+    box, pings = _Box(active=False), []
+    _hc_run(data, env, box, pings, T0)
+    assert pings == []                                  # 재시작 유예 — 침묵
+    _hc_run(data, env, box, pings, T0 + timedelta(minutes=5))
+    assert len(pings) == 1 and pings[0][1] is True and "꺼져" in pings[0][2]
+    _hc_run(data, env, box, pings, T0 + timedelta(minutes=7))
+    assert len(pings) == 1                              # 반복 알림 전까지 추가 실패 신호 없음
+
+
+def test_no_url_no_ping():
+    data, env = _setup()
+    pings = []
+    _hc_run(data, env, _Box(), pings, T0 + timedelta(minutes=1))
+    assert pings == []
+
+
+def test_ping_url_format():
+    calls = []
+
+    class R:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    orig = wd.urllib.request.urlopen
+    wd.urllib.request.urlopen = lambda req, timeout=0: calls.append(
+        (req.full_url, req.get_method(), req.data)) or R()
+    try:
+        assert wd.ping("https://hc-ping.com/abc/") is True
+        assert wd.ping("https://hc-ping.com/abc", fail=True, body="멈춤") is True
+    finally:
+        wd.urllib.request.urlopen = orig
+    assert calls[0] == ("https://hc-ping.com/abc", "GET", None)
+    assert calls[1][0] == "https://hc-ping.com/abc/fail" and calls[1][1] == "POST"
+    assert calls[1][2] == "멈춤".encode()
+
+
+def test_ping_failure_is_swallowed():
+    orig = wd.urllib.request.urlopen
+
+    def boom(*a, **k):
+        raise OSError("network")
+    wd.urllib.request.urlopen = boom
+    try:
+        assert wd.ping("https://hc-ping.com/abc") is False
+    finally:
+        wd.urllib.request.urlopen = orig
+
+
+# ================================================================
 
 if __name__ == "__main__":
     failed = 0

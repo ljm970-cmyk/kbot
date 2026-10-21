@@ -416,6 +416,12 @@ class SchedulerEngine:
             except KiwoomAPIError as e:
                 self.registry.set_status(record_id, "rejected", str(e))
                 await self.notifier.send(f"⛔ [{ticker}] {order} 접수 거부: {e.message}")
+                if order.trade_type == TradeType.MOC:
+                    fb = await self._moc_fallback(ticker, exchange, order, trade_date,
+                                                  f"접수 거부: {e.message}")
+                    if fb is not None:
+                        placed.append(fb)
+                        submitted += 1
             except Exception as e:
                 # 전송 자체가 안 된 경우(값 검증 실패 등). 원장에 '접수됨' 으로
                 # 남겨두면 나가지도 않은 주문이 다른 체결을 가로챈다.
@@ -477,6 +483,51 @@ class SchedulerEngine:
         if sells_left:
             L.append("  🔵 매도 주문은 그대로 접수합니다.")
         return "\n".join(L)
+
+    async def _moc_fallback(self, ticker: str, exchange: str, order, trade_date: str,
+                            reason: str):
+        """거부된 MOC 매도를 낮은 가격 LOC 매도로 다시 낸다. 낸 주문을 돌려준다."""
+        from core.reverse_guard import fallback_order
+        if self.config.dry_run:
+            return None
+        try:
+            q = await self.kiwoom.get_quote(ticker, exchange)
+            ref = q.get("cur_price") or q.get("prev_close") or 0.0
+            if ref <= 0:
+                raise ValueError("기준가를 받지 못했습니다")
+            fb = fallback_order(order, ref)
+            rid = self.registry.record_submission(trade_date, ticker, fb)
+            try:
+                res = await self.kiwoom.sell(ticker, exchange, fb.qty, fb.trade_type, fb.price)
+            except KiwoomOrderUncertainError as e:
+                # 접수됐을 수도 있다. 직접 팔라고 하면 두 번 팔린다.
+                self.registry.set_status(rid, "submitted", f"MOC 대체 결과 불명: {e}")
+                with self.state_mgr.edit_state(ticker) as st:
+                    CircuitBreaker.halt(st, f"MOC 대체 주문 결과 불명 — {fb}")
+                await self.notifier.send(
+                    f"🚨 [{ticker}] MOC 대체 LOC 매도의 결과를 확인할 수 없습니다.\n"
+                    f"  {fb.qty}주 LOC @{fb.price:.2f} 가 접수됐을 수 있습니다.\n"
+                    f"  직접 매도하지 말고, 먼저 앱 미체결 내역에서 이 주문이 있는지 확인하세요.\n"
+                    f"  없을 때만 직접 매도하세요. 이후 주문은 정지했습니다 (/unhalt {ticker}).")
+                return None
+            except Exception as e:
+                self.registry.set_status(rid, "rejected", f"MOC 대체 실패: {e}")
+                raise
+            if getattr(res, "ord_no", ""):
+                self.registry.attach_ord_no(rid, res.ord_no)
+            await self.notifier.send(
+                f"🔁 [{ticker}] MOC 매도가 거부돼 LOC 매도로 대체했습니다\n"
+                f"  사유: {reason}\n"
+                f"  {fb.qty}주 LOC @{fb.price:.2f} (기준가 ${ref:.2f}의 75%)\n"
+                f"  종가가 이 가격 이상이면 종가에 체결 — MOC 와 같은 효과입니다.")
+            return fb
+        except Exception as e:
+            logger.exception("[%s] MOC 대체 주문 실패", ticker)
+            await self.notifier.send(
+                f"🚨 [{ticker}] MOC 매도 거부 + 대체 LOC 매도도 실패했습니다: {e}\n"
+                f"  오늘 리버스 매도가 빠집니다. 앱에서 {order.qty}주를 직접 매도하세요\n"
+                f"  (LOC 아주 낮은 가격 또는 장 마감 직전 시장가).")
+            return None
 
     @staticmethod
     def _star_line(plan, state) -> str:
@@ -589,11 +640,26 @@ class SchedulerEngine:
 
             if bad:
                 lines = [f"⛔ [{ticker}] 예약주문 {len(bad)}건 거부"]
+                moc_rejected = []
                 for b in bad:
+                    rec = ours.get(str(b.get("rsrv_ord_no")))
                     self.registry.mark_rejected_by_rsrv_no(b["rsrv_ord_no"], b["reason"])
                     lines.append(f"  {b['ord_qty']}주 @{b['ord_uv']:.2f} — "
                                  f"{b['reason'] or b.get('proc_tp') or '사유 미상'}")
+                    # 오늘 낸 MOC 만 대체한다. 지난 날 기록이 남아 있다가
+                    # 거부로 보이는 경우까지 오늘 매도를 내면 안 된다.
+                    if (rec is not None and rec.trade_type == TradeType.MOC
+                            and rec.trade_date == session.strftime("%Y%m%d")):
+                        moc_rejected.append((rec, b))
                 await self.notifier.send("\n".join(lines))
+
+                # 리버스 MOC 매도가 거부되면 그날 매도가 빠진다 — 바로 LOC 로 대체
+                for rec, b in moc_rejected:
+                    order = PlannedOrder(tag=rec.tag, side="sell", trade_type=TradeType.MOC,
+                                         qty=rec.qty, price=None)
+                    await self._moc_fallback(ticker, exchange_of(ticker), order,
+                                             rec.trade_date,
+                                             f"예약 거부: {b['reason'] or b.get('proc_tp') or '사유 미상'}")
 
             await self._verify_live(ticker)
 
@@ -702,6 +768,7 @@ class SchedulerEngine:
         close_price = quote["cur_price"] or quote["prev_close"]
 
         with self.state_mgr.edit_state(ticker) as state:
+            t_before, mode_before = state.T, state.mode
             next_market = await self._market_snapshot(ticker, state.mode, quote=quote)
             result = self.eod.run(state, trade_date, fills, close_price, next_market)
             self.state_mgr.archive_eod(ticker, trade_date, {
@@ -712,6 +779,8 @@ class SchedulerEngine:
                 # 빠져 있어 /stats 가 사이클 종료를 몰랐다 (모든 사이클이 하나로 합쳐짐)
                 "cycle_closed": bool(result.cycle_closed),
                 "division": state.division, "principal": state.principal,
+                # 세금 계산(원화 환산)용 — 그날 기준환율
+                "usd_krw": quote.get("usd_krw") or 0.0,
             })
             CircuitBreaker.record_eod_success(state)
             try:
@@ -722,6 +791,15 @@ class SchedulerEngine:
             report = daily_report(state, self.registry, result, stats=stats)
 
         await self.notifier.send(report)
+
+        # 리버스 접근선(분할 − 5)을 처음 넘은 날 따로 알린다
+        try:
+            from core.reverse_guard import crossed_approach, crossing_alert
+            if crossed_approach(t_before, state.T, state.division, mode_before) \
+                    and state.mode == "normal":
+                await self.notifier.send(crossing_alert(ticker, state))
+        except Exception:
+            logger.exception("[%s] 리버스 접근 알림 실패", ticker)
 
         # 사이클이 끝난 날은 결산을 따로 보낸다
         if result.cycle_closed and stats is not None and stats.cycles:

@@ -552,6 +552,18 @@ class OrderRegistry:
                         "avg_price": amt / qty, "amount": amt})
         return out[-days:]
 
+    def filled_rows(self, ticker: str) -> list[dict]:
+        """체결된 주문 전부 (오래된 것부터). 세금 계산용 — 하루에 여러 건이면 매수를 먼저."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT id, trade_date, side, tag, filled_qty, filled_price FROM orders "
+                "WHERE ticker=? AND status IN (?,?) AND filled_qty > 0",
+                (ticker.upper(), OrderStatus.FILLED, OrderStatus.PARTIAL),
+            ).fetchall()
+        out = [dict(r) for r in rows]
+        out.sort(key=lambda r: (r["trade_date"], 0 if r["side"] == "buy" else 1, r["id"]))
+        return out
+
     def totals(self, ticker: str) -> dict:
         """누적 매수액·매도액·수량"""
         buy_amt = buy_qty = sell_amt = sell_qty = 0.0

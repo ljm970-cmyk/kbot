@@ -173,6 +173,8 @@ class KbotTelegramBot:
         app.add_handler(CommandHandler("health", self._cmd_health))
         app.add_handler(CommandHandler("backup", self._cmd_backup))
         app.add_handler(CommandHandler("weekly", self._cmd_weekly))
+        app.add_handler(CommandHandler("check", self._cmd_check))
+        app.add_handler(CommandHandler("tax", self._cmd_tax))
         app.add_handler(CommandHandler("panic", self._cmd_panic))
         app.add_handler(CallbackQueryHandler(
             self._on_panic_callback, pattern=r"^panic:"))
@@ -367,6 +369,73 @@ class KbotTelegramBot:
     # ============================================================
     # 운영 상태 · 긴급 정지
     # ============================================================
+
+    async def _cmd_tax(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """연간 실현손익: /tax [연도] — 요약 + CSV 파일"""
+        import tempfile
+        from datetime import datetime as _dt
+        from pathlib import Path as _P
+        from core.tax import format_yearly, write_csv, yearly
+        args = [a for a in (context.args or []) if a.strip()]
+        year = args[0] if args and args[0].isdigit() and len(args[0]) == 4 else str(_dt.now().year)
+        registry = getattr(self.scheduler, "registry", None)
+        if registry is None:
+            return await self._safe_send(update, "원장에 연결되지 않아 계산할 수 없습니다.")
+        rate = 0.0
+        try:
+            tickers = self.state.list_tickers()
+            if tickers and self.kiwoom is not None:
+                from kiwoom.constants import exchange_of
+                q = await self.kiwoom.get_quote(tickers[0], exchange_of(tickers[0]))
+                rate = float(q.get("usd_krw") or 0.0)
+        except Exception:
+            logger.warning("환율 조회 실패 — 기록된 환율만 씁니다")
+        try:
+            items = yearly(self.state, registry, year, fallback_rate=rate)
+        except Exception as e:
+            logger.exception("연간 손익 계산 실패")
+            return await self._safe_send(update, f"⚠️ 계산 실패: {e}")
+        await self._safe_send(update, format_yearly(year, items))
+        if items and any(t.sales for t in items):
+            path = _P(tempfile.gettempdir()) / f"kbot-실현손익-{year}.csv"
+            try:
+                write_csv(items, path)
+                await self.notifier.send_document(path, f"🧾 {year}년 실현손익 건별 내역")
+            finally:
+                path.unlink(missing_ok=True)
+
+    async def _cmd_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """점검: /check moc [종목] → 설명, /check moc go [종목] → 실행"""
+        from core.reverse_guard import check_intro, run_moc_check
+        from kiwoom.constants import exchange_of
+        args = [a.strip() for a in (context.args or []) if a.strip()]
+        if not args or args[0].lower() != "moc":
+            return await self._safe_send(
+                update, "점검 명령\n  /check moc — 리버스 첫날 쓰는 MOC 매도 경로 점검")
+        go = len(args) > 1 and args[1].lower() == "go"
+        rest = args[2:] if go else args[1:]
+
+        held = []
+        for t in self.state.list_tickers():
+            st = self.state.get_state(t)
+            if st is not None and st.holdings >= 1:
+                held.append(t)
+        ticker = rest[0].upper() if rest else (held[0] if held else "")
+        if not ticker:
+            return await self._safe_send(update, "보유 중인 종목이 없어 점검할 수 없습니다 (1주 이상 필요).")
+        if ticker not in held:
+            return await self._safe_send(
+                update, f"{ticker} 는 봇 장부에 보유가 없어 점검하지 않습니다. 보유 종목: {', '.join(held) or '없음'}")
+        if not go:
+            return await self._safe_send(update, check_intro(ticker))
+        await self._safe_send(update, f"🧪 {ticker} MOC 점검 중... (10초 정도)")
+        try:
+            text = await run_moc_check(self.kiwoom, ticker, exchange_of(ticker))
+        except Exception as e:
+            logger.exception("MOC 점검 실패")
+            text = (f"⚠️ MOC 점검 중 오류: {e}\n"
+                    f"  영웅문 앱 예약주문 내역에 {ticker} MOC 1주가 남았는지 확인하세요.")
+        await self._safe_send(update, text)
 
     async def _cmd_weekly(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """주간 요약을 지금 받는다: /weekly (지난 7일)"""
@@ -759,6 +828,9 @@ class KbotTelegramBot:
             return await self.cmd_handler.cmd_status(update, context)
         elif "주문내역" in text or "예약주문" in text:
             return await self.cmd_handler.cmd_orders(update, context)
+        # "세금 계산" 이 아래 "계산"(강제 정산)으로 새지 않게 먼저 본다
+        elif "세금" in text or "양도" in text or "실현손익" in text:
+            return await self._cmd_tax(update, context)
         elif "통계" in text or "성과" in text or "누적" in text:
             return await self._cmd_stats(update, context)
         elif "보정" in text or "수정" in text:
@@ -934,6 +1006,7 @@ class KbotTelegramBot:
             "/report [종목] — 일자별 매매 이력\n"
             "/stats [종목] — 누적 성과 (사이클·승률·손익)\n"
             "/weekly — 지난 7일 요약 (매주 토 09:05 자동)\n"
+            "/tax [연도] — 연간 실현손익 (세금 참고용, CSV 포함)\n"
             "/next — 다음 거래일 일정\n\n"
             "<b>━━ 📤 수동 실행 /run ━━</b>\n"
             "/run loc — LOC 매수·쿼터매도 접수\n"
@@ -955,9 +1028,10 @@ class KbotTelegramBot:
             "/pause, /resume — 스케줄 일시정지·재개\n\n"
             "<b>━━ 🔧 관리 ━━</b>\n"
             "/backup — 장부 백업 파일 받기 (매주 토 09:10 자동)\n"
-            "/calceod — 정산 강제 실행\n\n"
+            "/calceod — 정산 강제 실행\n"
+            "/check moc — 리버스 첫날 MOC 매도 경로 점검\n\n"
             "<b>━━ 💬 한글로도 됩니다 ━━</b>\n"
-            "'상태' '주문내역' '히스토리' '통계' '주간' '일정'\n"
+            "'상태' '주문내역' '히스토리' '통계' '주간' '세금' '일정'\n"
             "'보정' '설정' '패닉' '긴급정지' '정지해제'"
         )
         await update.effective_message.reply_text(msg, parse_mode='HTML')

@@ -210,6 +210,15 @@ async def run(config: AppConfig, check_only: bool = False) -> int:
             logger.warning("텔레그램 알림 채널을 찾지 못했습니다. "
                            "주문 결과가 로그에만 남습니다.")
 
+        # 실시간 체결 알림 — 20초 모아서 종목별로 한 번에.
+        # 알림이 실패해도 봇은 떠야 한다.
+        try:
+            from core.fill_alert import FillAlerter
+            ws_receiver.add_callback(
+                FillAlerter(registry, lambda: getattr(scheduler, "notifier", None)).on_fill)
+        except Exception:
+            logger.exception("체결 알림 연결 실패 — 알림 없이 계속합니다")
+
         scheduler.start()
         logger.info("스케줄러 시작\n%s", scheduler.preview())
 

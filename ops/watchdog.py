@@ -17,8 +17,11 @@
 봇 코드에 의존하지 않는다 (표준 라이브러리만). 봇이 import 오류로
 못 뜨는 상황에서도 이 감시는 돌아야 하기 때문이다.
 
-한계: VM 자체가 꺼지면 이 감시도 같이 꺼진다. 그 경우는 아침 요약이
-오지 않는 것으로 알게 된다.
+VM 자체가 꺼지면 이 감시도 같이 꺼진다. 그래서 .env 에 HEALTHCHECK_URL
+(healthchecks.io 등)을 넣으면, 봇이 정상일 때마다 그 주소로 "살아있음" 을
+보낸다. 신호가 끊기면 외부 서비스가 텔레그램·메일로 알린다 — VM 이 꺼지거나
+네트워크가 끊겨도 잡힌다. 봇에 문제가 생겨 이쪽이 알림을 보낼 때는 /fail 로
+알려 외부 쪽도 바로 빨간불이 된다.
 
 수동 실행
   venv/bin/python ops/watchdog.py           한 번 확인
@@ -87,6 +90,21 @@ def read_heartbeat(data_dir: Path) -> datetime | None:
         return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+
+def ping(url: str, fail: bool = False, body: str = "") -> bool:
+    """외부 감시(healthchecks.io 형식)에 신호. 정상은 url, 문제는 url/fail."""
+    if not url:
+        return False
+    target = url.rstrip("/") + ("/fail" if fail else "")
+    data = body.encode("utf-8")[:10000] if body else None
+    try:
+        req = urllib.request.Request(target, data=data, method="POST" if data else "GET")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return 200 <= r.status < 300
+    except Exception as e:
+        print(f"외부 감시 신호 실패: {e}", file=sys.stderr)
+        return False
 
 
 def send_telegram(token: str, chat_ids: list[str], text: str) -> bool:
@@ -181,7 +199,7 @@ def _save_state(data_dir: Path, state: dict) -> None:
 
 
 def run_once(data_dir: Path | None = None, env_file: Path = ENV_FILE, now: datetime | None = None,
-             active_fn=service_active, send_fn=send_telegram) -> str | None:
+             active_fn=service_active, send_fn=send_telegram, ping_fn=ping) -> str | None:
     data_dir = data_dir or _data_dir()
     now = now or datetime.now(timezone.utc)
     problem = diagnose(active_fn(), read_heartbeat(data_dir), now)
@@ -199,6 +217,15 @@ def run_once(data_dir: Path | None = None, env_file: Path = ENV_FILE, now: datet
             state = old if problem is None else {**state, "last_alert": None,
                                                  "alerted": old.get("alerted", False)}
     _save_state(data_dir, state)
+
+    # 외부 감시 — 정상이면 살아있음, 알림을 낸 순간이면 실패 신호.
+    # 재시작 유예 중에는 보내지 않는다 (외부 쪽 유예 시간이 덮는다).
+    url = read_env(env_file).get("HEALTHCHECK_URL", "").strip()
+    if url:
+        if problem is None:
+            ping_fn(url)
+        elif msg:
+            ping_fn(url, fail=True, body=problem)
     return msg
 
 
@@ -208,7 +235,14 @@ def main(argv: list[str]) -> int:
         ids = [x.strip() for x in env.get("TELEGRAM_ADMIN_ID", "").split(",") if x.strip()]
         ok = send_telegram(env.get("TELEGRAM_BOT_TOKEN", ""), ids,
                            "🧪 kbot 감시 시험 메시지 — 이게 보이면 알림 경로는 정상입니다.")
-        print("보냄" if ok else "실패")
+        print("텔레그램: " + ("보냄" if ok else "실패"))
+        url = env.get("HEALTHCHECK_URL", "").strip()
+        if url:
+            hc = ping(url)
+            print("외부 감시: " + ("신호 보냄 — healthchecks 화면에서 초록불 확인" if hc else "실패"))
+            ok = ok and hc
+        else:
+            print("외부 감시: HEALTHCHECK_URL 없음 (설정 안 함)")
         return 0 if ok else 1
     msg = run_once()
     now = datetime.now(timezone.utc)

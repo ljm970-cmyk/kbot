@@ -296,10 +296,12 @@ class WebSocketFillReceiver:
             fill = self._parse(block.get("values", {}))
             if fill is None:
                 continue
-            self._save(fill)
+            is_new = self._save(fill)
             logger.info("체결 %s %s %d주 @%.2f (주문가 %.2f, %s)",
                         fill.ticker, fill.side, fill.fill_qty,
                         fill.fill_price, fill.order_price, fill.status)
+            if not is_new:
+                continue        # 이미 받은 체결 — 알림을 두 번 보내지 않는다
             for cb in self._callbacks:
                 try:
                     cb(fill)
@@ -353,11 +355,13 @@ class WebSocketFillReceiver:
     # 저장 / 조회
     # ------------------------------------------------------------
 
-    def _save(self, fill: RealtimeFill) -> None:
+    def _save(self, fill: RealtimeFill) -> bool:
+        """새 체결이면 True. 같은 체결이 다시 오면(재연결 등) False."""
         with sqlite3.connect(self.db_path, timeout=10) as c:
-            c.execute(
+            cur = c.execute(
                 "INSERT OR IGNORE INTO realtime_fills VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 fill.to_row())
+            return cur.rowcount > 0
 
     async def fills_for(self, trade_date: str, ticker: str) -> list:
         """EOD 계산기에 넘길 FillEvent 목록.

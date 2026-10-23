@@ -175,6 +175,7 @@ class KbotTelegramBot:
         app.add_handler(CommandHandler("weekly", self._cmd_weekly))
         app.add_handler(CommandHandler("check", self._cmd_check))
         app.add_handler(CommandHandler("tax", self._cmd_tax))
+        app.add_handler(CommandHandler("cash", self._cmd_cash))
         app.add_handler(CommandHandler("panic", self._cmd_panic))
         app.add_handler(CallbackQueryHandler(
             self._on_panic_callback, pattern=r"^panic:"))
@@ -369,6 +370,39 @@ class KbotTelegramBot:
     # ============================================================
     # 운영 상태 · 긴급 정지
     # ============================================================
+
+    async def _cmd_cash(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """주문가능금액 진단: /cash — 증권사 응답 필드를 그대로 보여준다"""
+        from kiwoom.constants import exchange_of
+        tickers = self.state.list_tickers() or ["SOXL"]
+        t = tickers[0]
+        ex = exchange_of(t)
+
+        def _fmt(d: dict) -> str:
+            out = []
+            for k, v in sorted((d or {}).items()):
+                if "acnt" in k.lower() or "acct" in k.lower():
+                    continue            # 계좌번호 류는 숨긴다
+                out.append(f"  {k} = {v}")
+            return "\n".join(out) or "  (비어 있음)"
+
+        L = [f"💵 주문가능금액 진단 ({t})"]
+        try:
+            q = await self.kiwoom.get_quote(t, ex)
+            price = q.get("prev_close") or q.get("cur_price") or 0.0
+            L.append(f"기준가 {price}")
+            bp = await self.kiwoom.get_buying_power(t, ex, price)
+            L += ["", "▶ ust31490 주문가능 (봇은 min_ord_alowa 를 씀)", _fmt(bp.get("raw"))]
+        except Exception as e:
+            L.append(f"ust31490 실패: {e}")
+        try:
+            d = await self.kiwoom.get_deposit_usd()
+            L += ["", "▶ ust21160 예수금", _fmt(d.get("raw"))]
+        except Exception as e:
+            L.append(f"ust21160 실패: {e}")
+        text = "\n".join(L)
+        for i in range(0, len(text), 3800):          # 텔레그램 길이 제한
+            await self._safe_send(update, text[i:i + 3800])
 
     async def _cmd_tax(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """연간 실현손익: /tax [연도] — 요약 + CSV 파일"""

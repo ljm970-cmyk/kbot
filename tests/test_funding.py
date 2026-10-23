@@ -260,6 +260,48 @@ def test_buying_power_query_is_retryable():
     assert "ust31490" not in NON_IDEMPOTENT_APIS
 
 
+# 실측 응답 (2026-10-24 00:03, 원화주문 신청 계좌)
+_RAW_KRW = {
+    "fc_entra": "2657.28", "krw_ord_rqst_yn": "Y", "krw_ord_set_amt": "000001030000",
+    "krw_ord_evlt_amt": "753.33", "krw_ord_alowa_100": "861.73", "krw_ord_alowa_50": "1723.47",
+    "min_krw_ord_alowa": "861.73", "min_ord_alowa": "108.41", "min_ord_alowq": "000000000001",
+    "ord_alowa": "108.42", "ord_alowa_50": "216.83",
+}
+
+
+def _client_with(raw):
+    from kiwoom.api_client import KiwoomAPIClient
+    c = KiwoomAPIClient.__new__(KiwoomAPIClient)
+
+    async def req(api_id, path, body):
+        return raw, {}
+    c.request = req
+
+    async def dep():
+        return {"d0_usd": 999.0}
+    c.get_deposit_usd = dep
+    return c
+
+
+def test_krw_integrated_margin_counted():
+    """원화주문 신청 계좌는 원화 포함 미수불가 금액을 쓴다 (예전엔 달러만 봐서 $108)"""
+    c = _client_with(_RAW_KRW)
+    bp = asyncio.run(c.get_buying_power("SOXL", "NASD", 82.11))
+    assert bp["krw_order"] is True and bp["cash_no_margin_krw"] == 861.73
+    assert asyncio.run(c.available_usd("SOXL", "NASD", 82.11)) == 861.73
+
+
+def test_no_krw_order_uses_usd_only():
+    raw = dict(_RAW_KRW, krw_ord_rqst_yn="N", min_krw_ord_alowa="0")
+    assert asyncio.run(_client_with(raw).available_usd("SOXL", "NASD", 82.11)) == 108.41
+
+
+def test_never_uses_margin_amounts():
+    """50% 증거금 금액(미수 포함)은 쓰지 않는다"""
+    v = asyncio.run(_client_with(_RAW_KRW).available_usd("SOXL", "NASD", 82.11))
+    assert v not in (1723.47, 216.83)
+
+
 # ================================================================
 
 if __name__ == "__main__":

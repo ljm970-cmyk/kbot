@@ -895,9 +895,17 @@ class KiwoomAPIClient:
         """
         body = {"stex_tp": exchange, "stk_cd": ticker, "uv": fmt_price(price)}
         data, _ = await self.request("ust31490", self.PATH_ORDER, body)
+        # 원화주문(통합증거금)을 신청한 계좌는 원화도 매수에 쓸 수 있다.
+        # min_ord_alowa 는 달러만 센다. 원화 포함 미수불가 금액은
+        # min_krw_ord_alowa 다. (실측 2026-10-24: 달러 $108.41, 원화 1,030,000원
+        # 평가 $753.33 → min_krw_ord_alowa $861.73 = 앱의 "외화 주문가능금액")
+        krw_on = str(data.get("krw_ord_rqst_yn", "")).strip().upper() == "Y"
         return {
-            "cash_no_margin": to_float(data.get("min_ord_alowa")),   # 미수불가
+            "cash_no_margin": to_float(data.get("min_ord_alowa")),   # 미수불가 (달러만)
             "qty_no_margin": to_int(data.get("min_ord_alowq")),
+            "cash_no_margin_krw": to_float(data.get("min_krw_ord_alowa")),  # 미수불가 (원화 포함)
+            "krw_order": krw_on,
+            "krw_eval_usd": to_float(data.get("krw_ord_evlt_amt")),  # 원화 주문설정금의 달러 평가액
             "cash": to_float(data.get("ord_alowa")),                  # 주문가능현금
             "fx_deposit": to_float(data.get("fc_entra")),             # 외화예수금
             "raw": data,
@@ -907,6 +915,8 @@ class KiwoomAPIClient:
         """매수에 쓸 수 있는 달러. 주문가능금액 조회가 실패하면 D0 예수금으로 물러난다."""
         try:
             bp = await self.get_buying_power(ticker, exchange, price)
+            if bp.get("krw_order") and bp.get("cash_no_margin_krw", 0) > bp["cash_no_margin"]:
+                return bp["cash_no_margin_krw"]           # 원화 통합증거금 포함
             if bp["cash_no_margin"] > 0 or bp["fx_deposit"] > 0:
                 return bp["cash_no_margin"]
         except Exception as e:

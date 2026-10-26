@@ -55,6 +55,18 @@ class TelegramNotifier:
                 except Exception as e:
                     self._log.warning("알림 전송 실패 (%s): %s", admin_id, e)
 
+    async def send_buttons(self, text: str, rows: list) -> None:
+        """버튼이 달린 알림. rows: [[(라벨, callback_data), ...], ...]"""
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(label, callback_data=data) for label, data in row]
+             for row in rows])
+        for admin_id in self.telegram.admin_ids:
+            try:
+                await self.application.bot.send_message(
+                    chat_id=admin_id, text=text[:self.MAX_LEN], reply_markup=markup)
+            except Exception as e:
+                self._log.warning("버튼 알림 전송 실패 (%s): %s", admin_id, e)
+
     async def send_document(self, path, caption: str = "") -> bool:
         """관리자에게 파일을 보낸다. 한 명이라도 받았으면 True."""
         ok = False
@@ -176,6 +188,7 @@ class KbotTelegramBot:
         app.add_handler(CommandHandler("check", self._cmd_check))
         app.add_handler(CommandHandler("tax", self._cmd_tax))
         app.add_handler(CommandHandler("cash", self._cmd_cash))
+        app.add_handler(CommandHandler("principal", self._cmd_principal))
         app.add_handler(CommandHandler("panic", self._cmd_panic))
         app.add_handler(CallbackQueryHandler(
             self._on_panic_callback, pattern=r"^panic:"))
@@ -849,6 +862,8 @@ class KbotTelegramBot:
         text = update.effective_message.text.strip()
 
         # 설정 값 입력 대기 중이면 먼저 소비한다.
+        if await self._on_principal_text(update, context):
+            return
         if await self._on_config_text(update, context):
             return
 
@@ -985,11 +1000,122 @@ class KbotTelegramBot:
             context.args = []
             return await self.cmd_handler.cmd_config(update, context)
 
+        # ── 사이클 종료 후 새 원금 ──
+        if head == "PRIN":
+            return await self._on_principal_button(update, context, parts)
+
         if data == "RESET:CANCEL":
             return await query.edit_message_text("취소했습니다.")
 
         logger.warning("처리하지 않는 버튼: %s", data)
         await self._safe_send(update, f"이 버튼은 지원하지 않습니다 ({data}).")
+
+    # ── 새 원금 (사이클 종료 후) ────────────────────────────────
+
+    async def _reply_buttons(self, update, text: str, rows: list) -> None:
+        msg = update.effective_message
+        if msg is None:
+            return
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(label, callback_data=data) for label, data in row]
+             for row in rows])
+        try:
+            await msg.reply_text(text, reply_markup=markup)
+        except Exception:
+            logger.exception("버튼 메시지 전송 실패")
+
+    async def _available_or_none(self):
+        try:
+            return await self.scheduler._account_available() if self.scheduler else None
+        except Exception:
+            return None
+
+    async def _on_principal_button(self, update, context, parts: list):
+        from core import principal as P
+        kind = parts[1] if len(parts) > 1 else ""
+        ticker = (parts[2] if len(parts) > 2 else "").upper()
+        st = self.state.get_state(ticker) if ticker else None
+        if st is None:
+            return await self._safe_send(update, "종목을 찾지 못했습니다.")
+
+        if kind in (P.KEEP, P.PROFIT):
+            context.user_data.pop("principal_edit", None)
+            return await self._safe_send(update, P.apply(self.state, ticker, P.amount_for(st, kind)))
+        if kind == P.INPUT:
+            context.user_data.pop("config_edit", None)
+            context.user_data["principal_edit"] = ticker
+            return await self._safe_send(
+                update, f"{ticker} 새 원금을 숫자로 보내 주세요 (예: 25000).\n"
+                        f"취소하려면 '취소' 라고 보내세요.")
+        context.user_data.pop("principal_edit", None)
+        if kind == P.SET and len(parts) > 3:
+            amt = P.parse_amount(parts[3])
+            if amt is None:
+                return await self._safe_send(update, "금액을 읽지 못했습니다.")
+            return await self._safe_send(update, P.apply(self.state, ticker, amt))
+        if kind == P.CANCEL:
+            return await self._safe_send(
+                update, f"취소했습니다. {ticker} 새 원금은 아직 대기 중입니다. /principal {ticker}")
+        return await self._safe_send(update, f"이 버튼은 지원하지 않습니다 ({':'.join(parts)}).")
+
+    async def _on_principal_text(self, update, context) -> bool:
+        """'직접 입력' 뒤 금액 메시지. 처리했으면 True."""
+        from core import principal as P
+        ticker = context.user_data.get("principal_edit")
+        if not ticker:
+            return False
+        text = (update.effective_message.text or "").strip()
+        if text in ("취소", "cancel"):
+            context.user_data.pop("principal_edit", None)
+            await self._safe_send(update, f"취소했습니다. {ticker} 새 원금은 아직 대기 중입니다.")
+            return True
+        # 첫 메시지 하나만 받는다. 숫자가 아니면 입력을 끝내고 원래 명령으로 넘긴다
+        # (계속 붙잡고 있으면 '상태' 같은 다른 명령이 막힌다).
+        context.user_data.pop("principal_edit", None)
+        amt = P.parse_amount(text)
+        st = self.state.get_state(ticker)
+        if amt is None or st is None:
+            await self._safe_send(
+                update, f"원금 입력을 끝냈습니다 (숫자가 아니어서). 다시 하려면 /principal {ticker}")
+            return False
+        why = P.check_amount(st, amt)
+        if why:
+            await self._safe_send(update, f"⚠️ {why}\n다시 하려면 /principal {ticker}")
+            return True
+        text, rows = P.confirm(ticker, st, amt, await self._available_or_none())
+        await self._reply_buttons(update, text, rows)
+        return True
+
+    async def _cmd_principal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """새 원금: /principal [종목] [keep|profit|금액]"""
+        from core import principal as P
+        args = [a for a in (context.args or []) if a.strip()]
+        waiting = P.awaiting_tickers(self.state)
+        ticker = args[0].upper() if args else (waiting[0] if len(waiting) == 1 else "")
+        if not ticker:
+            msg = ("새 원금을 기다리는 종목이 없습니다." if not waiting
+                   else f"원금 대기 종목: {', '.join(waiting)}\n/principal 종목 으로 고르세요.")
+            return await self._safe_send(update, msg)
+        st = self.state.get_state(ticker)
+        if st is None:
+            return await self._safe_send(update, f"{ticker} 설정이 없습니다.")
+        if st.holdings > 0:
+            return await self._safe_send(
+                update, f"{ticker} 는 진행 중인 사이클(보유 {st.holdings}주)입니다. "
+                        f"원금은 사이클이 끝난 뒤 정합니다 (/config 로 바꾸면 다음 사이클부터 반영).")
+        choice = args[1].lower() if len(args) > 1 else ""
+        if choice in ("keep", "그대로"):
+            return await self._safe_send(update, P.apply(self.state, ticker, P.amount_for(st, P.KEEP)))
+        if choice in ("profit", "수익"):
+            return await self._safe_send(update, P.apply(self.state, ticker, P.amount_for(st, P.PROFIT)))
+        if choice:
+            amt = P.parse_amount(choice)
+            if amt is None:
+                return await self._safe_send(update, "형식: /principal SOXL keep | profit | 25000")
+            text, rows = P.confirm(ticker, st, amt, await self._available_or_none())
+            return await self._reply_buttons(update, text, rows)
+        text, rows = P.prompt(ticker, st, await self._available_or_none())
+        return await self._reply_buttons(update, text, rows)
 
     # ── 설정 값 입력 ────────────────────────────────────────────
 
@@ -1001,6 +1127,7 @@ class KbotTelegramBot:
 
     async def _prompt_config_edit(self, update, context, ticker: str, action: str):
         key, label, example = self._CONFIG_KEYS[action]
+        context.user_data.pop("principal_edit", None)
         context.user_data["config_edit"] = (ticker, key, label)
         await self._safe_send(
             update,
@@ -1054,6 +1181,7 @@ class KbotTelegramBot:
             "<b>━━ ⚙️ 설정·보정 ━━</b>\n"
             "/start — 초기 설정 · 종목 추가\n"
             "/config — 분할·원금·수수료 변경\n"
+            "/principal — 사이클 끝난 뒤 새 원금 정하기\n"
             "/fix — 체결 누락·T값 수동 보정\n\n"
             "<b>━━ ⛔ 정지 ━━</b>\n"
             "/halt — 신규 주문만 정지 (걸린 주문은 유지)\n"

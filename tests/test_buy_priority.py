@@ -306,7 +306,7 @@ def test_engine_rerun_after_deposit_adds_only_missing():
 def test_engine_all_fit_is_quiet_about_funding():
     eng, _, sent = _engine(available=100_000.0)
     _run(eng)
-    assert not any("달러가 부족" in s for s in sent)
+    assert not any("주문가능금액이 부족" in s for s in sent)
 
 
 # ================================================================

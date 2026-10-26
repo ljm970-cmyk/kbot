@@ -32,6 +32,7 @@ class FundingCheck:
     need: float          # 그날 매수 주문을 모두 받으려면 필요한 금액
     available: float     # 실제 매수 가능 금액 (미수불가)
     core_need: float = -1.0   # 핵심 매수(별지점·평단)만의 금액. 모르면 -1
+    krw_rate: float = 0.0     # 기준환율. 있으면 부족액을 원화로도 보여준다
 
     @property
     def shortfall(self) -> float:
@@ -50,8 +51,12 @@ class FundingCheck:
     def core_ok(self) -> bool:
         return self.core_shortfall <= 0.0
 
+    def _w(self, usd: float) -> str:
+        from core.fx import krw_text
+        return krw_text(usd, self.krw_rate)
+
     def topup_text(self) -> str:
-        """입금 안내"""
+        """입금 안내. 가능 금액은 원화 주문설정금을 포함한 미수불가 금액이다."""
         if self.need <= 0:
             return "  ✅ 매수 주문 없음 — 입금 불필요"
         if self.ok:
@@ -63,15 +68,17 @@ class FundingCheck:
             return (f"  필요 ${self.need:,.2f} / 가능 ${self.available:,.2f}\n"
                     f"  ✅ 별지점·평단 매수 ${self.core_need:,.2f} 는 충분\n"
                     f"  ⚪ 폭락대비는 일부만 들어갑니다 "
-                    f"(전부 걸려면 ${self.shortfall:,.2f} 더 입금)")
+                    f"(전부 걸려면 ${self.shortfall:,.2f}{self._w(self.shortfall)} 더 입금)")
 
         lines = [f"  필요 ${self.need:,.2f} / 가능 ${self.available:,.2f}"]
         if has_core:
             lines.append(f"  ⚠️ 별지점·평단 매수에도 ${self.core_shortfall:,.2f} 부족")
-            lines.append(f"     최소 ${self.core_shortfall:,.2f} · "
-                         f"전체 ${self.shortfall:,.2f} 입금이 필요합니다")
+            lines.append(f"     최소 ${self.core_shortfall:,.2f}{self._w(self.core_shortfall)} · "
+                         f"전체 ${self.shortfall:,.2f}{self._w(self.shortfall)} 입금이 필요합니다")
         else:
-            lines.append(f"  ⚠️ ${self.shortfall:,.2f} 입금이 필요합니다")
+            lines.append(f"  ⚠️ ${self.shortfall:,.2f}{self._w(self.shortfall)} 입금이 필요합니다")
+        if self.krw_rate:
+            lines.append("     (원화는 증권사가 약 4% 낮게 평가해 넉넉히 잡았습니다)")
         return "\n".join(lines)
 
 
@@ -183,7 +190,8 @@ def buy_need(plan, fee_rate: float) -> float:
     return round(gross * (1 + fee_rate + SAFETY_MARGIN), 2)
 
 
-def account_summary(needs: dict, available: float, core_needs: dict = None) -> str:
+def account_summary(needs: dict, available: float, core_needs: dict = None,
+                    krw_rate: float = 0.0) -> str:
     """여러 종목이 같은 달러를 나눠 쓸 때의 입금 안내.
 
     종목마다 따로 비교하면 각자는 충분해 보여도 합치면 모자랄 수 있다.
@@ -199,7 +207,8 @@ def account_summary(needs: dict, available: float, core_needs: dict = None) -> s
     core_total = -1.0
     if core_needs is not None:
         core_total = round(sum(core_needs.get(t, n) for t, n in active.items()), 2)
-    chk = FundingCheck(need=total, available=available, core_need=core_total)
+    chk = FundingCheck(need=total, available=available, core_need=core_total,
+                       krw_rate=krw_rate)
 
     lines = ["💰 오늘 매수 자금"]
     if not active:

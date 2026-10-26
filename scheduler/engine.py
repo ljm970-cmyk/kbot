@@ -281,7 +281,8 @@ class SchedulerEngine:
         total = 0.0
         for t in tickers:
             st = self.state_mgr.get_state(t)
-            if st is None or CircuitBreaker.is_halted(st):
+            if (st is None or CircuitBreaker.is_halted(st)
+                    or getattr(st, "awaiting_principal", False)):
                 continue
             total += max(0.0, _core_or_full(st))
         return round(total, 2)
@@ -311,6 +312,13 @@ class SchedulerEngine:
                     f"  사유: {state.halt_reason}\n"
                     f"  확인 후 /unhalt {ticker} 로 해제하세요."
                 )
+            return 0.0
+
+        # 사이클이 끝나고 새 원금을 아직 안 골랐으면 첫 매수를 대기한다
+        if getattr(state, "awaiting_principal", False) and state.holdings <= 0:
+            logger.info("[%s] 새 원금 대기 중 — %s 접수를 건너뜁니다", ticker, label)
+            if window == SubmitWindow.REGULAR:
+                await self._ask_principal(ticker, reminder=True)
             return 0.0
 
         market = await self._market_snapshot(ticker, state.mode)
@@ -374,7 +382,9 @@ class SchedulerEngine:
                 if not alloc.all_placed:
                     keep = {id(o) for o in alloc.placed}
                     orders = [o for o in orders if o.side != "buy" or id(o) in keep]
-                    await self.notifier.send(self._funding_notice(ticker, alloc, orders))
+                    from core.fx import safe_rate
+                    await self.notifier.send(self._funding_notice(
+                        ticker, alloc, orders, krw_rate=safe_rate(self.state_mgr)))
                     if not orders:
                         return 0.0
 
@@ -449,17 +459,18 @@ class SchedulerEngine:
         return round(sum(order_cost(o, fee_rate) for o in orders if o.side == "buy"), 2)
 
     @staticmethod
-    def _funding_notice(ticker: str, alloc, orders: list) -> str:
-        """달러가 모자라 일부 매수를 뺄 때의 알림"""
+    def _funding_notice(ticker: str, alloc, orders: list, krw_rate: float = 0.0) -> str:
+        """주문가능금액(원화 포함)이 모자라 일부 매수를 뺄 때의 알림"""
+        from core.fx import krw_text
         def _line(o):
             return f"    {o.qty}주 @{o.price:.2f}  {o.tag}"
 
         placed_buys = [o for o in alloc.placed]
         sells_left = any(o.side == "sell" for o in orders)
         head = ("💸" if not alloc.core_complete else "⚪")
-        L = [f"{head} [{ticker}] 달러가 부족해 매수 일부만 접수합니다"
+        L = [f"{head} [{ticker}] 주문가능금액이 부족해 매수 일부만 접수합니다"
              if placed_buys else
-             f"💸 [{ticker}] 달러가 부족해 오늘 매수를 건너뜁니다",
+             f"💸 [{ticker}] 주문가능금액이 부족해 오늘 매수를 건너뜁니다",
              f"  가능 ${alloc.available:,.2f} · 핵심 ${alloc.core_need:,.2f} · "
              f"전체 ${alloc.full_need:,.2f}"]
 
@@ -474,7 +485,8 @@ class SchedulerEngine:
         L.append("")
         if not alloc.core_complete:
             short = max(0.0, alloc.core_need - alloc.available)
-            L.append(f"  ⚠️ 별지점·평단 매수가 빠졌습니다. 최소 ${short:,.2f} 입금 후")
+            L.append(f"  ⚠️ 별지점·평단 매수가 빠졌습니다. 최소 ${short:,.2f}"
+                     f"{krw_text(short, krw_rate)} 입금 후")
             L.append("     /run loc 로 빠진 매수만 다시 접수할 수 있습니다 (장 시작 전까지).")
         else:
             L.append("  ✅ 별지점·평단 매수는 모두 들어갔습니다. 폭락대비만 일부 빠짐.")
@@ -483,6 +495,25 @@ class SchedulerEngine:
         if sells_left:
             L.append("  🔵 매도 주문은 그대로 접수합니다.")
         return "\n".join(L)
+
+    async def _ask_principal(self, ticker: str, reminder: bool = False) -> None:
+        """새 원금 선택 버튼을 보낸다"""
+        from core.principal import prompt
+        try:
+            st = self.state_mgr.get_state(ticker)
+            if st is None or not getattr(st, "awaiting_principal", False):
+                return
+            avail = await self._account_available()
+            text, rows = prompt(ticker, st, avail)
+            if reminder:
+                text = "⏸ 오늘 첫 매수를 하지 않았습니다 — " + text.lstrip("💰 ")
+            sender = getattr(self.notifier, "send_buttons", None)
+            if sender is not None:
+                await sender(text, rows)
+            else:
+                await self.notifier.send(text)
+        except Exception:
+            logger.exception("[%s] 원금 선택 안내 실패", ticker)
 
     async def _moc_fallback(self, ticker: str, exchange: str, order, trade_date: str,
                             reason: str):
@@ -767,10 +798,22 @@ class SchedulerEngine:
         quote = await self.kiwoom.get_quote(ticker, exchange)
         close_price = quote["cur_price"] or quote["prev_close"]
 
+        # 시세 조회(await)는 잠금 밖에서 한다. 잠금을 쥔 채 기다리면 그 사이
+        # 텔레그램 버튼이 같은 종목 잠금을 요청할 때 이벤트 루프가 멈춘다.
+        pre = self.state_mgr.get_state(ticker)
+        next_market = await self._market_snapshot(ticker, pre.mode, quote=quote)
+
         with self.state_mgr.edit_state(ticker) as state:
             t_before, mode_before = state.T, state.mode
-            next_market = await self._market_snapshot(ticker, state.mode, quote=quote)
+            if state.mode != pre.mode:          # 그 사이 바뀌었으면 다시 조회하지 않고 그대로 쓴다
+                logger.warning("[%s] 정산 중 모드가 바뀌었습니다 (%s → %s)", ticker, pre.mode, state.mode)
             result = self.eod.run(state, trade_date, fills, close_price, next_market)
+            # 사이클이 끝나면 새 원금을 고를 때까지 첫 매수를 대기한다
+            if result.cycle_closed and state.holdings <= 0:
+                state.awaiting_principal = True
+            if getattr(state, "awaiting_principal", False):
+                state.next_buy_need = 0.0
+                state.next_core_need = 0.0
             self.state_mgr.archive_eod(ticker, trade_date, {
                 "T": state.T, "holdings": state.holdings,
                 "avg_price": state.avg_price, "cash": state.cash,
@@ -801,12 +844,14 @@ class SchedulerEngine:
         except Exception:
             logger.exception("[%s] 리버스 접근 알림 실패", ticker)
 
-        # 사이클이 끝난 날은 결산을 따로 보낸다
+        # 사이클이 끝난 날은 결산을 따로 보내고, 새 원금을 묻는다
         if result.cycle_closed and stats is not None and stats.cycles:
             try:
                 await self.notifier.send(self._cycle_end_text(ticker, stats, state))
             except Exception:
                 logger.exception("[%s] 사이클 결산 전송 실패", ticker)
+        if result.cycle_closed and state.holdings <= 0:
+            await self._ask_principal(ticker)
 
         # 장부 대조 — 어긋나면 다음 거래일 주문을 멈춘다
         await self._reconcile_ticker(ticker, exchange, result)
@@ -965,14 +1010,17 @@ class SchedulerEngine:
         available = await self._account_available()
         if available is None:
             return
+        from core.fx import safe_rate
+        rate = safe_rate(self.state_mgr)
         needs, cores = {}, {}
         for t in self.state_mgr.list_tickers():
             st = self.state_mgr.get_state(t)
-            if st is not None and not getattr(st, "halted", False):
+            if (st is not None and not getattr(st, "halted", False)
+                    and not getattr(st, "awaiting_principal", False)):
                 needs[t] = st.next_buy_need
                 cores[t] = _core_or_full(st)
         chk = FundingCheck(need=sum(needs.values()), available=available,
-                           core_need=sum(cores.values()))
+                           core_need=sum(cores.values()), krw_rate=rate)
         if chk.ok:
             return
         tail = ("입금하지 않으면 별지점·평단 매수는 들어가고 폭락대비만 일부 빠집니다."
@@ -980,8 +1028,8 @@ class SchedulerEngine:
                 "입금하지 않으면 우선순위대로 들어갈 수 있는 매수만 접수합니다.\n"
                 "(별지점·평단 먼저, 폭락대비는 그다음)")
         await self.notifier.send(
-            "⏰ 1시간 뒤 주문 접수 — 달러가 부족합니다.\n\n"
-            + account_summary(needs, available, cores)
+            "⏰ 1시간 뒤 주문 접수 — 주문가능금액(원화 포함)이 부족합니다.\n\n"
+            + account_summary(needs, available, cores, krw_rate=rate)
             + "\n\n" + tail)
 
     async def send_weekly(self, today: Optional[date] = None) -> None:

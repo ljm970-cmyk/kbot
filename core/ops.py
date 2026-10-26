@@ -275,6 +275,15 @@ def morning_brief(state_mgr, registry, scheduler=None, available=None) -> str:
 
     L = [f"☀️ 아침 요약 — {datetime.now(KST):%m/%d (%a)}", ""]
 
+    # 오늘 밤·다음 거래일 휴장·조기폐장 안내
+    try:
+        from core.market_notice import notice_lines
+        notes = notice_lines(datetime.now(KST).date())
+        if notes:
+            L += notes + [""]
+    except Exception:
+        pass
+
     tickers = state_mgr.list_tickers()
     if not tickers:
         return "\n".join(L + ["  설정된 종목이 없습니다."])
@@ -318,18 +327,23 @@ def morning_brief(state_mgr, registry, scheduler=None, available=None) -> str:
 
         if getattr(st, "halted", False):
             L.append(f"  ⚠️ {st.halt_reason}")
+        if getattr(st, "awaiting_principal", False):
+            L.append(f"  ⏸ 새 사이클 원금 대기 중 — 첫 매수를 하지 않습니다. /principal {t}")
         L.append("")
 
     # 오늘 입금 안내 — 모든 종목이 같은 달러를 쓰므로 합산해서 비교한다
     if available is not None:
         from core.funding import account_summary
+        from core.fx import safe_rate
         needs, cores = {}, {}
         for t in tickers:
             st = state_mgr.get_state(t)
-            if st is not None and not getattr(st, "halted", False):
+            if (st is not None and not getattr(st, "halted", False)
+                    and not getattr(st, "awaiting_principal", False)):
                 needs[t] = getattr(st, "next_buy_need", 0.0)
                 cores[t] = _core_or_full(st)
-        L.append(account_summary(needs, float(available), cores))
+        L.append(account_summary(needs, float(available), cores,
+                                 krw_rate=safe_rate(state_mgr)))
         L.append("")
 
     try:

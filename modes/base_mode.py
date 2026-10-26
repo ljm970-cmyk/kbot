@@ -64,6 +64,7 @@ class PositionState:
     last_star_point: float = 0.0    # 마지막 계획의 별지점 (텔레그램 표시용)
     next_buy_need: float = 0.0      # 다음 거래일 매수에 필요한 달러 (입금 안내용)
     next_core_need: float = -1.0    # 그중 별지점·평단 등 핵심 매수만의 금액 (-1: 모름)
+    awaiting_principal: bool = False  # 사이클 종료 후 새 원금을 고를 때까지 첫 매수 대기
 
     # --- dict 스타일 읽기 (tg_bot 호환) ---
     # 기존 텔레그램 코드가 state['T'] 처럼 접근한다. 재작성 비용을 피하려고
@@ -105,6 +106,7 @@ class PositionState:
             last_star_point=float(d.get("last_star_point", 0.0)),
             next_buy_need=float(d.get("next_buy_need", 0.0)),
             next_core_need=float(d.get("next_core_need", -1.0)),
+            awaiting_principal=bool(d.get("awaiting_principal", False)),
             reverse_first_day=bool(d.get("reverse_first_day", False)),
             reverse_start_T=float(d.get("reverse_start_T", 0.0)),
             last_close_price=float(d.get("last_close_price", 0.0)),
@@ -124,6 +126,7 @@ class PositionState:
             "reverse_first_day": self.reverse_first_day,
             "reverse_start_T": self.reverse_start_T,
             "last_close_price": self.last_close_price,
+            "awaiting_principal": self.awaiting_principal,
             "halted": self.halted,
             "halt_reason": self.halt_reason,
             "halted_at": self.halted_at,

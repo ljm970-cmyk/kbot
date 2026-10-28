@@ -25,7 +25,7 @@
   리버스모드로 전환한다.
 
 매도 (전·후반 공통)
-  쿼터매도  보유수량 ÷ 4 (반올림) 를 별지점에 LOC 매도
+  쿼터매도  보유수량 ÷ 4 (내림) 를 별지점에 LOC 매도
   목표매도  나머지 전량을 평단 +15%(TQQQ) / +20%(SOXL) 에 지정가매도.
             프리장 시작에 걸어 애프터까지 살려둔다.
 ================================================================
@@ -311,7 +311,10 @@ class NormalMode(BaseTradingMode):
     def _plan_sells(self, plan: OrderPlan, star) -> None:
         st = self.state
 
-        quarter_qty = int(round_half_up(st.holdings / 4, 0))
+        # 원문: "보유수량의 1/4 분량" — 소수점 처리는 정하지 않았다.
+        # 내림으로 한다 (MOUM 등 계산기와 같은 값). 83주 → 20주.
+        # 보유 1~3주면 0주라 쿼터매도 없이 전량 목표매도만 건다.
+        quarter_qty = st.holdings // 4
         quarter_qty = max(0, min(quarter_qty, st.holdings))
 
         if quarter_qty > 0:

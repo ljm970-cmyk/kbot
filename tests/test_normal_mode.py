@@ -148,7 +148,7 @@ def test_second_half_star_below_avg():
 
 def test_sell_split_doc_example():
     """별지점 59.55, 보유 141주
-    → LOC 매도 35주 (1/4, 반올림), 지정가매도 106주 (3/4)"""
+    → LOC 매도 35주 (1/4, 내림), 지정가매도 106주 (3/4)"""
     p = _plan(ticker="TQQQ", division=40, principal=20000, fee_rate=0.0007,
               T=24.0, avg_price=59.55 / 0.97, holdings=141, cash=568.50 * 16,
               prev_close=60.0, current_price=60.0)
@@ -184,13 +184,29 @@ def test_target_sell_submits_at_pre_market():
     assert _by_tag(p, FillKind.QUARTER_SELL)[0].window == SubmitWindow.ANY
 
 
-def test_quarter_sell_rounds_half_up():
-    """보유 10주 → 10/4 = 2.5 → 3주 (banker's rounding 이면 2주가 된다)"""
+def test_quarter_sell_rounds_down():
+    """원문은 '보유수량의 1/4' 만 정한다. 내림으로 맞춘다 (MOUM 과 같은 값).
+    10주 → 2.5 → 2주, 83주 → 20.75 → 20주"""
     p = _plan(ticker="TQQQ", division=40, principal=20000, fee_rate=0.0007,
               T=5.0, avg_price=100.0, holdings=10, cash=2000,
               prev_close=100.0, current_price=100.0)
-    assert _by_tag(p, FillKind.QUARTER_SELL)[0].qty == 3
-    assert _by_tag(p, FillKind.TARGET_SELL)[0].qty == 7
+    assert _by_tag(p, FillKind.QUARTER_SELL)[0].qty == 2
+    assert _by_tag(p, FillKind.TARGET_SELL)[0].qty == 8
+
+    p = _plan(ticker="SOXL", division=40, principal=20000, fee_rate=0.0007,
+              T=21.5, avg_price=116.36, holdings=83, cash=10335.0,
+              prev_close=94.0, current_price=94.0)
+    assert _by_tag(p, FillKind.QUARTER_SELL)[0].qty == 20
+    assert _by_tag(p, FillKind.TARGET_SELL)[0].qty == 63
+
+
+def test_quarter_sell_skipped_under_four_shares():
+    """보유 3주 → 0.75 → 0주. 쿼터매도 없이 3주 전부 목표매도"""
+    p = _plan(ticker="TQQQ", division=40, principal=20000, fee_rate=0.0007,
+              T=1.0, avg_price=100.0, holdings=3, cash=19500,
+              prev_close=100.0, current_price=100.0)
+    assert _by_tag(p, FillKind.QUARTER_SELL) == []
+    assert _by_tag(p, FillKind.TARGET_SELL)[0].qty == 3
 
 
 # ================================================================

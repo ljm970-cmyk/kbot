@@ -317,6 +317,16 @@ class OrderRegistry:
             ).fetchall()
         return sorted({r["tag"] for r in rows} & want)
 
+    def live_prices(self, trade_date: str, ticker: str, tag: str) -> list[float]:
+        """해당 거래일에 거부·취소되지 않은 같은 태그 주문들의 가격"""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT price FROM orders WHERE trade_date=? AND ticker=? AND tag=? "
+                "AND status NOT IN (?,?)",
+                (trade_date, ticker.upper(), tag, OrderStatus.REJECTED, OrderStatus.CANCELLED),
+            ).fetchall()
+        return [round(float(r["price"] or 0.0), 2) for r in rows]
+
     # ============================================================
     # 체결 매칭
     # ============================================================

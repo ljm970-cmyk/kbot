@@ -276,6 +276,40 @@ class SchedulerEngine:
                 logger.exception("%s %s 접수 실패", ticker, label)
                 await self.notifier.send(f"⚠ [{ticker}] {label} 접수 실패: {e}")
 
+    #: 하루에 여러 건 나가는 태그 — 태그가 아니라 가격으로 중복을 본다
+    MULTI_TAGS = frozenset({FillKind.CRASH_BUY})
+
+    def _drop_already_submitted(self, ticker: str, trade_date: str, orders: list):
+        """이미 접수한 주문을 뺀다. (남은 주문, 중복으로 본 태그들)
+
+        대부분의 태그는 하루 한 건이라 태그로 거른다. 폭락대비는 한 번에
+        5건이 나가므로 태그로 거르면, 돈이 모자라 1건만 들어간 날 /run loc
+        로 나머지를 다시 낼 수 없었다 (실제 2026-11-02). 폭락대비는
+        같은 가격이 이미 있으면 빼고, 전체 건수가 계획보다 많아지지 않게 한다.
+        """
+        single = [o.tag for o in orders if o.tag not in self.MULTI_TAGS]
+        dup_single = set(self.registry.already_submitted(trade_date, ticker, single))
+        out, dup_tags = [], set(dup_single)
+        multi_planned: dict[str, list] = {}
+        for o in orders:
+            if o.tag in self.MULTI_TAGS:
+                multi_planned.setdefault(o.tag, []).append(o)
+            elif o.tag not in dup_single:
+                out.append(o)
+        for tag, planned in multi_planned.items():
+            live = self.registry.live_prices(trade_date, ticker, tag)
+            live_set = set(live)
+            room = max(0, len(planned) - len(live))
+            fresh = [o for o in sorted(planned, key=lambda x: -(x.price or 0))
+                     if round(float(o.price or 0.0), 2) not in live_set][:room]
+            if len(fresh) < len(planned):
+                dup_tags.add(tag)
+            out += fresh
+        # 원래 순서 유지
+        order_index = {id(o): i for i, o in enumerate(orders)}
+        out.sort(key=lambda o: order_index[id(o)])
+        return out, dup_tags
+
     def _core_reserve(self, tickers: list) -> float:
         """뒤에 접수할 종목들의 핵심 매수 예상 금액 (정지 종목 제외)"""
         total = 0.0
@@ -343,13 +377,10 @@ class SchedulerEngine:
         # 창구 단위가 아니라 주문 단위로 걸러낸다. 자금 부족으로 매수만
         # 건너뛴 날, 입금 후 /run loc 로 다시 실행하면 이미 낸 매도는 빼고
         # 매수만 접수되어야 한다.
-        dup = set(self.registry.already_submitted(
-            trade_date, ticker, [o.tag for o in orders]))
-        if dup:
-            skipped = [o for o in orders if o.tag in dup]
-            orders = [o for o in orders if o.tag not in dup]
-            logger.info("[%s] %s 중 이미 접수된 %d건 제외 (%s)",
-                        ticker, label, len(skipped), ", ".join(sorted(dup)))
+        orders, dup_tags = self._drop_already_submitted(ticker, trade_date, orders)
+        if dup_tags:
+            logger.info("[%s] %s 중 이미 접수된 주문 제외 (%s)",
+                        ticker, label, ", ".join(sorted(dup_tags)))
             if not orders:
                 await self.notifier.send(
                     f"ℹ️ [{ticker}] {label} 는 모두 이미 접수돼 있어 건너뛰었습니다.")

@@ -309,6 +309,43 @@ def test_engine_all_fit_is_quiet_about_funding():
     assert not any("주문가능금액이 부족" in s for s in sent)
 
 
+def test_rerun_after_partial_crash_adds_remaining_crash():
+    """폭락대비가 일부만 들어간 날 /run loc — 빠진 폭락대비만 더 낸다 (실제 2026-11-02).
+    예전엔 태그로 걸러 '모두 이미 접수' 로 건너뛰었다."""
+    from core.funding import order_cost
+    eng, placed, sent = _engine(available=100_000.0)
+    _run(eng)
+    full = sorted(o.price for o in placed if o.tag == FillKind.CRASH_BUY)
+    assert len(full) == 5
+
+    # 핵심 + 폭락대비 맨 윗칸 1건만 들어가는 돈으로 다시 시작
+    core_cost = sum(order_cost(o, FEE) for o in placed
+                    if o.side == "buy" and o.tag != FillKind.CRASH_BUY)
+    eng, placed, sent = _engine(available=0.0)
+
+    async def tight(t, ex, price):
+        return tight.v
+    tight.v = core_cost + max(full) * (1 + FEE + 0.005) + 1.0
+    eng.kiwoom.available_usd = tight
+    _run(eng)
+    first = [o.price for o in placed if o.tag == FillKind.CRASH_BUY]
+    assert first == [max(full)]
+
+    tight.v = 100_000.0
+    placed.clear()
+    _run(eng)
+    again = sorted(o.price for o in placed if o.tag == FillKind.CRASH_BUY)
+    assert again == sorted(full)[:4]                     # 빠진 4건만
+    assert not any(o.tag in (FillKind.STAR_BUY, FillKind.AVG_BUY) for o in placed)
+    assert not any(o.side == "sell" for o in placed)      # 매도도 다시 안 냄
+
+    placed.clear()
+    sent.clear()
+    _run(eng)
+    assert placed == []
+    assert any("모두 이미 접수" in s for s in sent)
+
+
 # ================================================================
 
 def test_submit_report_shows_star_percent():

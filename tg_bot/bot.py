@@ -188,6 +188,7 @@ class KbotTelegramBot:
         app.add_handler(CommandHandler("check", self._cmd_check))
         app.add_handler(CommandHandler("tax", self._cmd_tax))
         app.add_handler(CommandHandler("cash", self._cmd_cash))
+        app.add_handler(CommandHandler("today", self._cmd_today))
         app.add_handler(CommandHandler("principal", self._cmd_principal))
         app.add_handler(CommandHandler("panic", self._cmd_panic))
         app.add_handler(CallbackQueryHandler(
@@ -415,6 +416,67 @@ class KbotTelegramBot:
             L.append(f"ust21160 실패: {e}")
         text = "\n".join(L)
         for i in range(0, len(text), 3800):          # 텔레그램 길이 제한
+            await self._safe_send(update, text[i:i + 3800])
+
+    async def _cmd_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """오늘 주문 진단: /today 종목 [가격] — 증권사 당일 주문내역(ust21510) 원본
+
+        앱에서 거부·취소 사유가 안 보일 때 쓴다. 가격을 주면 그 가격 주문만.
+        봇 원장에 기록된 같은 가격 주문(주문번호·상태)도 함께 보여준다.
+        """
+        from kiwoom.constants import exchange_of
+        args = [a for a in (context.args or []) if a.strip()]
+        if not args:
+            return await self._safe_send(update, "형식: /today TQQQ 72.55  (가격은 생략 가능)")
+        t = args[0].upper()
+        price = None
+        if len(args) > 1:
+            try:
+                price = float(args[1].replace("$", "").replace(",", ""))
+            except ValueError:
+                return await self._safe_send(update, "가격을 숫자로 넣어 주세요 (예: 72.55)")
+
+        def _match(p):
+            try:
+                return price is None or abs(float(p or 0) - price) < 0.005
+            except (TypeError, ValueError):
+                return False
+
+        L = [f"🧾 오늘 주문 진단 — {t}" + (f" @{price:.2f}" if price is not None else "")]
+        try:
+            rows = await self.kiwoom.get_today_orders(t, exchange_of(t))
+        except Exception as e:
+            rows = []
+            L.append(f"ust21510 조회 실패: {e}")
+        hits = [r for r in rows if _match(r.get("ord_uv"))]
+        L.append(f"증권사 당일 주문 {len(rows)}건 중 {len(hits)}건")
+        for i, r in enumerate(hits[:6], 1):
+            L.append(f"\n▶ #{i}")
+            for k, v in sorted((r.get("raw") or {}).items()):
+                if "acnt" in k.lower() or "acct" in k.lower():
+                    continue
+                L.append(f"  {k} = {v}")
+        if len(hits) > 6:
+            L.append(f"\n… {len(hits) - 6}건 더 (가격을 지정해 좁혀 보세요)")
+
+        reg = getattr(self.scheduler, "registry", None)
+        if reg is not None:
+            try:
+                from core.market_calendar import session_date_for
+                day = session_date_for().strftime("%Y%m%d")
+                mine = [o for o in reg.day_orders(day, t)
+                        if price is None or (o.price and abs(o.price - price) < 0.005)]
+                L.append(f"\n▶ 봇 원장 ({day})")
+                for o in mine[:10]:
+                    L.append(f"  {o.side} {o.qty}주 @{o.price} [{o.tag}] {o.status} "
+                             f"ord_no={o.ord_no or '-'} {o.note or ''}".rstrip())
+                if not mine:
+                    L.append("  (해당 주문 없음)")
+            except Exception as e:
+                L.append(f"원장 조회 실패: {e}")
+
+        text = "\n".join(L)
+        for i in range(0, len(text), 3800):
             await self._safe_send(update, text[i:i + 3800])
 
     async def _cmd_tax(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

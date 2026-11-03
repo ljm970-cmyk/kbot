@@ -127,15 +127,42 @@ def test_resolve_moc_without_price():
     assert rec.tag == FillKind.REVERSE_MOC_SELL
 
 
-def test_rejected_order_is_not_matched():
-    """ust21205 검증에서 거부된 주문은 체결될 수 없으므로 후보에서 빠진다"""
+def test_rejected_order_loses_to_live_order():
+    """거부된 주문은 체결될 수 없다. 같은 가격의 살아 있는 주문이 있으면 그쪽으로 잇는다."""
     reg = _reg()
     plan = _plan()
-    rid = reg.record_submission(DAY, TICKER, plan.orders[0], rsrv_ord_no="R1")
+    o = plan.orders[0]
+    rid = reg.record_submission(DAY, TICKER, o, rsrv_ord_no="R1")
     reg.mark_rejected_by_rsrv_no("R1", "증거금 부족")
-
     assert reg.get(rid).status == OrderStatus.REJECTED
-    assert reg.resolve(DAY, TICKER, "buy", price=plan.orders[0].price) is None
+    live = reg.record_submission(DAY, TICKER, o)
+    assert reg.resolve(DAY, TICKER, "buy", price=o.price, qty=o.qty).id == live
+
+
+def test_manual_reentry_of_rejected_order_restores_tag():
+    """봇 주문이 거부된 뒤 앱에서 같은 주문을 직접 넣으면 (주문번호 모름)
+    같은 가격·수량의 거부 기록에 잇는다 — 태그를 잃지 않게 (실제 2026-11-03)."""
+    reg = _reg()
+    plan = _plan()
+    o = plan.orders[0]
+    rid = reg.record_submission(DAY, TICKER, o, rsrv_ord_no="R1")
+    reg.mark_rejected_by_rsrv_no("R1", "거부")
+    rec = reg.record_fill(DAY, TICKER, "buy", o.qty, o.price - 1.0,
+                          ord_no="MANUAL9", order_price=o.price)
+    assert rec is not None and rec.id == rid and rec.tag == o.tag
+    assert reg.get(rid).status == OrderStatus.FILLED
+    # 같은 체결이 다시 들어와도 두 번 더하지 않는다
+    assert reg.record_fill(DAY, TICKER, "buy", o.qty, o.price - 1.0,
+                           ord_no="MANUAL9", order_price=o.price) is None
+
+
+def test_rejected_not_matched_when_qty_differs():
+    reg = _reg()
+    plan = _plan()
+    o = plan.orders[0]
+    reg.record_submission(DAY, TICKER, o, rsrv_ord_no="R1")
+    reg.mark_rejected_by_rsrv_no("R1", "거부")
+    assert reg.resolve(DAY, TICKER, "buy", price=o.price, qty=o.qty + 7) is None
 
 
 def test_trade_type_disambiguates_price_collision():

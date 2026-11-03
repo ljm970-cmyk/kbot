@@ -360,7 +360,7 @@ class OrderRegistry:
             if r.side == side and (not trade_type or r.trade_type == trade_type)
         ]
         if not candidates:
-            return None
+            return self._rejected_match(trade_date, ticker, side, price, qty, trade_type)
 
         # 단가 매칭
         if price is not None:
@@ -390,6 +390,11 @@ class OrderRegistry:
                     price, len(exact), ticker, trade_date)
                 return exact[0]
 
+            # 살아 있는 주문 중엔 같은 가격이 없다 — 거부된 주문을 앱에서 다시 넣은 경우일 수 있다
+            rec = self._rejected_match(trade_date, ticker, side, price, qty, trade_type)
+            if rec is not None:
+                return rec
+
         # MOC/시장가처럼 단가가 없는 주문
         no_price = [r for r in candidates if r.price is None]
         if len(no_price) == 1:
@@ -400,6 +405,32 @@ class OrderRegistry:
             return by_qty[0]
 
         return None
+
+    def _rejected_match(self, trade_date, ticker, side, price, qty, trade_type):
+        """봇 주문이 증권사에서 거부된 뒤 사용자가 앱에서 같은 주문을 직접 넣은 경우.
+
+        주문번호는 모르지만 같은 날·같은 가격·같은 유형·같은 수량의 거부 기록이
+        있으면 그 주문으로 본다 (태그 복원). 같은 주문을 여러 번 냈다가 거부돼
+        기록이 여럿이어도 태그가 하나면 가장 최근 기록에 붙인다.
+        (실제 2026-11-03 TQQQ 별지점 3주 @72.55: 두 번 거부 → 앱에서 직접 접수)
+        """
+        if price is None:
+            return None
+        rej = [r for r in self.day_orders(trade_date, ticker)
+               if r.status == OrderStatus.REJECTED and r.side == side
+               and r.price is not None and abs(r.price - price) <= PRICE_TOLERANCE
+               and (not trade_type or r.trade_type == trade_type)
+               and (not qty or r.qty == qty)]
+        if not rej or len({r.tag for r in rej}) != 1:
+            return None
+        tag = rej[0].tag
+        # 같은 태그가 그날 이미 다른 주문으로 살아 있거나 체결됐으면, 이 체결은
+        # 거부 주문의 대신이 아니다 (봇이 재접수했고 사용자도 넣은 경우 등).
+        if any(r.tag == tag and r.status in (OrderStatus.SUBMITTED, OrderStatus.PARTIAL,
+                                             OrderStatus.FILLED)
+               for r in self.day_orders(trade_date, ticker)):
+            return None
+        return max(rej, key=lambda r: r.id)
 
     def record_fill(
         self,

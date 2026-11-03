@@ -147,6 +147,31 @@ def test_usage_and_bad_price():
     assert "숫자" in u.effective_message.sent[0]
 
 
+def test_pasted_code_formatted_command_runs():
+    """코드 서식으로 붙여넣으면 텔레그램이 명령으로 표시하지 않는다 — 글자로 와도 실행한다"""
+    b = _bot(ROWS)
+    calls = []
+
+    async def today(update, context):
+        calls.append(list(context.args))
+
+    class H:
+        commands = frozenset({"today"})
+        callback = staticmethod(today)
+    b.application = type("A", (), {"handlers": {0: [H()]}})()
+    u = _U()
+    u.effective_message.text = "/today TQQQ 72.55"
+    asyncio.run(b._handle_message(u, _C([])))
+    assert calls == [["TQQQ", "72.55"]]
+
+
+def test_unknown_pasted_command_falls_through():
+    b = _bot(ROWS)
+    b.application = type("A", (), {"handlers": {0: []}})()
+    u = _U()
+    assert asyncio.run(b._dispatch_pasted_command(u, _C([]), "/nope")) is False
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

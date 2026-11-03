@@ -916,12 +916,31 @@ class KbotTelegramBot:
     # 메시지 라우팅 (기존 [5] 확장)
     # ============================================================
     
+    async def _dispatch_pasted_command(self, update, context, text: str) -> bool:
+        parts = text.split()
+        name = parts[0][1:].split("@", 1)[0].lower()
+        app = getattr(self, "application", None)
+        handlers = getattr(app, "handlers", {}) or {}
+        for group in sorted(handlers):
+            for h in handlers[group]:
+                cmds = getattr(h, "commands", None)
+                if cmds and name in cmds:
+                    context.args = parts[1:]
+                    await h.callback(update, context)
+                    return True
+        return False
+
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """한글 자연어 명령 라우팅"""
         if not update.effective_message or not update.effective_message.text:
             return
         
         text = update.effective_message.text.strip()
+
+        # 코드 서식(고정폭)으로 붙여넣은 명령은 텔레그램이 명령으로 표시하지 않아
+        # 여기로 온다. "/today TQQQ 72.55" 같은 글이면 해당 명령을 그대로 실행한다.
+        if text.startswith("/") and await self._dispatch_pasted_command(update, context, text):
+            return
 
         # 설정 값 입력 대기 중이면 먼저 소비한다.
         if await self._on_principal_text(update, context):

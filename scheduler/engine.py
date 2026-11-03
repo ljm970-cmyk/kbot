@@ -212,6 +212,13 @@ class SchedulerEngine:
         ]
         # 주문 1시간 전 자금 점검 — 매일 부족분을 채우는 운용용
         from datetime import timedelta as _td
+        # 프리장에서 증권사가 거부한 핵심 LOC 매수를 정규장에서 되살린다.
+        # 1차 같은 가격 재접수 → 2차 현재가×1.15 대체(방법론 8) → 3차 알림.
+        # 거부는 접수 몇 초 뒤에 오므로 단계마다 15분 간격으로 확인한다.
+        # (functools.partial 대신 진짜 async 메서드를 넘긴다 — 스케줄러가 코루틴으로 알아보게)
+        for i, (mins, fn) in enumerate(((1, self._recover_first), (16, self._recover_second),
+                                        (31, self._recover_final)), start=1):
+            jobs.append((f"recover_rejected_{i}", sched.verify_open + _td(minutes=mins), fn))
         jobs.append(("funding_reminder", sched.premarket - _td(hours=1),
                      self._funding_reminder))
 
@@ -746,15 +753,56 @@ class SchedulerEngine:
             logger.warning("[%s] 미체결 조회 실패 — 취소 반영 생략: %s", ticker, e)
             return 0
 
-        gone = [r for r in recs if r.ord_no not in live]
+        from core.order_registry import normalize_ord_no
+        live_n = {normalize_ord_no(n) for n in live}
+        gone = [r for r in recs if normalize_ord_no(r.ord_no) not in live_n]
+        if not gone:
+            return 0
+        stats = await self._broker_stats(ticker)
+        rej = can = unk = 0
         for r in gone:
-            self.registry.set_status(r.id, "cancelled", "증권사 미체결에서 사라짐 (직접 취소)")
-        if gone:
-            logger.info("[%s] 직접 취소된 LOC %d건 원장 반영", ticker, len(gone))
+            kind = self._mark_gone(r, stats)
+            rej += kind == "rejected"
+            can += kind == "cancelled"
+            unk += kind == "unknown"
+        logger.info("[%s] 미체결에서 사라진 LOC — 거부 %d · 취소 %d · 확인불가 %d", ticker, rej, can, unk)
+        if rej or can:
+            parts = ([f"거부 {rej}건"] if rej else []) + ([f"취소 {can}건"] if can else [])
             await self.notifier.send(
-                f"🗑 [{ticker}] 앱에서 취소된 LOC {len(gone)}건을 확인했습니다. "
-                f"다시 접수합니다.")
-        return len(gone)
+                f"🗑 [{ticker}] 미체결에서 사라진 LOC 를 확인했습니다 ({' · '.join(parts)}). 다시 접수합니다.")
+        if unk:
+            await self.notifier.send(
+                f"⚠️ [{ticker}] 미체결에 안 보이는 LOC {unk}건의 상태를 증권사에서 확인하지 못했습니다.\n"
+                f"  중복을 막으려고 다시 내지 않습니다. 앱 미체결을 확인해 주세요 (/today {ticker}).")
+        return rej + can
+
+    async def _broker_stats(self, ticker: str) -> dict:
+        """증권사 당일 주문의 상태 {정규화 주문번호: '접수'/'거부'/'취소'...}. 실패하면 {}"""
+        from core.order_registry import normalize_ord_no
+        try:
+            rows = await self.kiwoom.get_today_orders(ticker, exchange_of(ticker))
+        except Exception as e:
+            logger.warning("[%s] 당일 주문 조회 실패: %s", ticker, e)
+            return {}
+        return {normalize_ord_no(r.get("ord_no")): str(r.get("ord_stat") or "") for r in rows}
+
+    def _mark_gone(self, rec, stats: dict) -> str:
+        """미체결에서 사라진 LOC 를 증권사 상태대로 원장에 반영한다.
+
+        'rejected' / 'cancelled' 는 증권사가 그렇게 말할 때만 쓴다. 상태를 모르거나
+        (조회 실패·목록 지연) 아직 '접수' 라고 하면 원장을 바꾸지 않고 'unknown'.
+        살아 있는 주문을 취소로 적으면 /run loc 가 같은 주문을 한 번 더 낸다.
+        """
+        from core.order_registry import normalize_ord_no
+        st = stats.get(normalize_ord_no(rec.ord_no), "")
+        base = (rec.note or "").strip()
+        if "거부" in st:
+            self.registry.set_status(rec.id, "rejected", (base + " · 증권사 거부").strip(" ·"))
+            return "rejected"
+        if "취소" in st:
+            self.registry.set_status(rec.id, "cancelled", (base + " · 직접 취소").strip(" ·"))
+            return "cancelled"
+        return "unknown"
 
     async def _verify_live(self, ticker: str) -> None:
         """봇이 낸 실시간 주문이 미체결에 살아 있는지 확인한다.
@@ -778,17 +826,171 @@ class SchedulerEngine:
             logger.warning("[%s] 미체결 조회 실패: %s", ticker, e)
             return
 
+        from core.order_registry import normalize_ord_no
+        live_n = {normalize_ord_no(n) for n in live}
         missing = [r for no, r in ours.items()
-                   if no not in live and r.trade_type == TradeType.LOC]
+                   if normalize_ord_no(no) not in live_n and r.trade_type == TradeType.LOC]
         if not missing:
             return
-        lines = [f"⚠️ [{ticker}] LOC 주문 {len(missing)}건이 미체결에서 사라졌습니다",
-                 "  종가 전에는 체결될 수 없으니 거부·취소됐을 가능성이 큽니다."]
+        stats = await self._broker_stats(ticker)
+        lines = [f"⚠️ [{ticker}] LOC 주문 {len(missing)}건이 미체결에서 사라졌습니다"]
+        any_core_buy = False
         for r in missing:
+            kind = self._mark_gone(r, stats)
             side = "🔴 매수" if r.side == "buy" else "🔵 매도"
-            lines.append(f"  {side} {r.qty}주 @{r.price:.2f} [{r.tag}]")
-        lines.append("  키움 앱 주문내역에서 사유를 확인하세요.")
+            word = {"rejected": "증권사 거부", "cancelled": "취소됨"}.get(
+                kind, "상태 확인 불가 — 그대로 둡니다")
+            lines.append(f"  {side} {r.qty}주 @{r.price:.2f} [{r.tag}] — {word}")
+            if kind == "rejected" and self._is_core_loc_buy(r):
+                any_core_buy = True
+        if any_core_buy:
+            lines.append("  거부된 별지점·평단 매수는 정규장에서 자동으로 다시 냅니다"
+                         " (같은 가격 → 현재가×1.15 대체).")
+        else:
+            lines.append("  키움 앱 주문내역에서 확인하세요.")
         await self.notifier.send("\n".join(lines))
+
+    # ------------------------------------------------------------
+    # 거부된 핵심 매수 되살리기
+    # ------------------------------------------------------------
+
+    #: 원장 메모 표시 — 몇 단계까지 했는지
+    R1, R2, R3 = "정규장 재접수", "가격제한 대체", "자동 복구 실패 알림"
+
+    @staticmethod
+    def _is_core_loc_buy(rec) -> bool:
+        from core.t_calculator import MAIN_BUY_KINDS
+        return (rec.side == "buy" and rec.trade_type == TradeType.LOC
+                and (rec.tag in MAIN_BUY_KINDS or rec.tag == FillKind.REVERSE_QUARTER_BUY))
+
+    async def _recover_first(self, session: date) -> None:
+        await self.recover_rejected(session)
+
+    async def _recover_second(self, session: date) -> None:
+        await self.recover_rejected(session)
+
+    async def _recover_final(self, session: date) -> None:
+        await self.recover_rejected(session, final=True)
+
+    async def recover_rejected(self, session: date, final: bool = False) -> None:
+        """증권사가 거부한 핵심 LOC 매수를 정규장에서 되살린다.
+
+        프리장에서 별지점 매수가 거부되고 정규장에서는 같은 주문이 받아진
+        사례가 있었다 (2026-11-03 TQQQ 3주 @72.55: 18:02·19:43 거부, 00:40 접수).
+        현재가보다 위에 거는 매수가 프리장 가격 범위에 걸린 것으로 보인다.
+
+          1차  같은 태그·가격·수량으로 다시 낸다
+          2차  그래도 거부되면 현재가×1.15 에 같은 금액만큼 (방법론 8)
+          3차  그래도 안 되면 직접 확인하라고 알린다
+
+        태그는 원래 것을 그대로 쓴다. 전반전 별지점 매수(+0.5)를 대체 매수
+        (+1)로 바꾸면 T 가 틀어진다.
+        """
+        if self.config.dry_run:
+            return
+        trade_date = session.strftime("%Y%m%d")
+        for ticker in self.state_mgr.list_tickers():
+            try:
+                st = self.state_mgr.get_state(ticker)
+                if st is None or CircuitBreaker.is_halted(st):
+                    continue
+                if getattr(st, "awaiting_principal", False):
+                    continue
+                await self._verify_live(ticker)          # 새로 거부된 것을 원장에 반영
+                await self._recover_ticker(ticker, trade_date, final)
+            except Exception:
+                logger.exception("[%s] 거부 주문 복구 실패", ticker)
+
+    async def _recover_ticker(self, ticker: str, trade_date: str, final: bool = False) -> None:
+        recs = [r for r in self.registry.day_orders(trade_date, ticker) if self._is_core_loc_buy(r)]
+        by_tag: dict[str, list] = {}
+        for r in recs:
+            by_tag.setdefault(r.tag, []).append(r)
+        exchange = exchange_of(ticker)
+        for tag, rows in by_tag.items():
+            if any(r.status in ("submitted", "partial", "filled") for r in rows):
+                continue                                  # 살아 있거나 체결됨 (결과 불명 포함)
+            if any(self.R3 in (r.note or "") for r in rows):
+                continue                                  # 이미 포기 알림을 보냈다 — 더 내지 않는다
+            latest = max(rows, key=lambda r: r.id)
+            note = latest.note or ""
+            if latest.status != "rejected" or "증권사 거부" not in note:
+                continue                                  # 직접 취소 등은 건드리지 않는다
+            if self.R2 in note:
+                await self._recover_give_up(ticker, rows)
+                continue
+            if self.R1 not in note:
+                res = await self._recover_place(ticker, exchange, trade_date, latest,
+                                                latest.price, latest.qty, self.R1)
+                if res != "rejected":
+                    continue                              # 접수됨 또는 결과 불명 → 다음 확인에서
+            # 2단계: 현재가 × 1.15
+            try:
+                q = await self.kiwoom.get_quote(ticker, exchange)
+                cur = float(q.get("cur_price") or q.get("prev_close") or 0.0)
+            except Exception:
+                cur = 0.0
+            if cur <= 0:
+                if final:
+                    await self._recover_give_up(ticker, rows)
+                continue                                  # 시세를 못 받았다 — 다음 확인에서 다시
+            from core.star_point import round_half_up
+            guard = round_half_up(cur * 1.15, 2)
+            amount = (latest.price or 0.0) * latest.qty
+            qty = int(amount // guard) if guard > 0 else 0
+            if guard >= (latest.price or 0.0) or qty < 1:
+                await self._recover_give_up(ticker, rows)        # 가격 문제가 아니다
+                continue
+            res = await self._recover_place(ticker, exchange, trade_date, latest,
+                                            guard, qty, self.R2)
+            if res == "rejected":
+                await self._recover_give_up(
+                    ticker, [r for r in self.registry.day_orders(trade_date, ticker) if r.tag == tag])
+
+    async def _recover_place(self, ticker, exchange, trade_date, src, price, qty, mark) -> str:
+        """복구 주문 한 건. 'placed' / 'rejected' / 'unknown'
+
+        증권사가 명시적으로 거부한 경우(KiwoomAPIError)만 'rejected'. 그 밖의
+        오류는 주문이 나갔을 수 있으므로 'unknown' 으로 멈춘다 (다음 단계로 가면
+        주문이 두 건 살아 있을 수 있다).
+        """
+        order = PlannedOrder(tag=src.tag, side="buy", trade_type=TradeType.LOC,
+                             qty=int(qty), price=float(price), note=mark)
+        rid = self.registry.record_submission(trade_date, ticker, order)
+        try:
+            res = await self.kiwoom.buy(ticker, exchange, order.qty, order.trade_type, order.price)
+        except KiwoomAPIError as e:
+            self.registry.set_status(rid, "rejected", f"{mark} · 증권사 거부: {e}")
+            return "rejected"
+        except Exception as e:
+            self.registry.set_status(rid, "submitted", f"{mark} · 결과 불명: {e}")
+            await self.notifier.send(
+                f"🚨 [{ticker}] {mark} 주문 결과를 확인할 수 없습니다 ({order.qty}주 @{order.price:.2f}).\n"
+                f"  앱 미체결에서 확인하세요. 중복을 막으려고 더 내지 않습니다.")
+            return "unknown"
+        if getattr(res, "ord_no", ""):
+            self.registry.attach_ord_no(rid, res.ord_no)
+        head = "🔁" if mark == self.R1 else "🛟"
+        how = ("같은 가격으로 정규장에서 다시 냈습니다" if mark == self.R1
+               else "현재가×1.15 로 대체해 냈습니다 (방법론 8)")
+        await self.notifier.send(
+            f"{head} [{ticker}] 거부된 {src.tag} 를 {how}\n"
+            f"  {order.qty}주 LOC @{order.price:.2f}  (원래 {src.qty}주 @{src.price:.2f})")
+        return "placed"
+
+    async def _recover_give_up(self, ticker: str, rows) -> None:
+        """포기 알림. 같은 태그의 기록 모두에 표시해 다음 확인에서 다시 내지 않는다."""
+        rows = [r for r in rows if self._is_core_loc_buy(r)]
+        if not rows:
+            return
+        first = min(rows, key=lambda r: r.id)
+        for r in rows:
+            if r.tag == first.tag and self.R3 not in (r.note or ""):
+                self.registry.set_status(r.id, r.status, ((r.note or "") + f" · {self.R3}").strip(" ·"))
+        await self.notifier.send(
+            f"🚨 [{ticker}] {first.tag} 매수가 다시 내도 거부됐습니다 ({first.qty}주 @{first.price:.2f}).\n"
+            f"  봇은 오늘 이 매수를 더 내지 않습니다. 꼭 넣어야 하면 앱에서 같은 가격 LOC 로 직접 넣으세요\n"
+            f"  (같은 가격·수량이면 정산 때 봇 주문으로 인식됩니다). /today {ticker} {first.price:.2f}")
 
     # ------------------------------------------------------------
     # EOD 정산

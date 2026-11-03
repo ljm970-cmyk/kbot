@@ -179,7 +179,7 @@ def test_registry_wired_to_orders_view():
 # 앱에서 직접 취소 → /run loc 재접수
 # ================================================================
 
-def _engine(sm, reg, open_nos, fail_query=False):
+def _engine(sm, reg, open_nos, fail_query=False, cancelled_nos=("A1",)):
     from scheduler.engine import SchedulerEngine
     sent = []
 
@@ -188,6 +188,10 @@ def _engine(sm, reg, open_nos, fail_query=False):
             if fail_query:
                 raise RuntimeError("조회 실패")
             return [{"ord_no": n} for n in open_nos]
+
+        async def get_today_orders(self, t, ex):
+            # 미체결에 없는 주문은 증권사가 '취소' 로 알려주는 상황
+            return [{"ord_no": n, "ord_stat": "취소"} for n in cancelled_nos]
 
     class N:
         async def send(self, text): sent.append(text)
@@ -222,6 +226,24 @@ def test_limit_sell_not_touched():
     assert asyncio.run(eng._sync_cancelled_loc("SOXL", DAY)) == 0
 
 
+def test_unknown_broker_status_left_alone():
+    """증권사 상태를 모르면 취소로 적지 않는다 — 살아 있는 주문을 다시 내면 두 배가 된다"""
+    sm, reg = _setup()
+    rid = _record(reg, FillKind.ENTRY_BUY, "buy", TradeType.LOC, 3, 163.11, "A1")
+    eng, sent = _engine(sm, reg, open_nos=[], cancelled_nos=())
+    assert asyncio.run(eng._sync_cancelled_loc("SOXL", DAY)) == 0
+    assert [r.status for r in reg.day_orders(DAY, "SOXL") if r.id == rid] == ["submitted"]
+    assert any("확인하지 못했습니다" in m for m in sent)
+
+
+def test_padded_order_numbers_match():
+    """주문번호 앞자리 0 이 달라도 같은 주문으로 본다"""
+    sm, reg = _setup()
+    _record(reg, FillKind.ENTRY_BUY, "buy", TradeType.LOC, 3, 163.11, "000012345")
+    eng, _ = _engine(sm, reg, open_nos=["12345"])
+    assert asyncio.run(eng._sync_cancelled_loc("SOXL", DAY)) == 0
+
+
 def test_query_failure_changes_nothing():
     """확인 없이 취소로 표시하면 살아 있는 주문을 한 번 더 내게 된다"""
     sm, reg = _setup()
@@ -244,6 +266,9 @@ def test_rerun_after_manual_cancel_resubmits():
         async def get_quote(self, t, ex): return {"cur_price": 141.83, "prev_close": 141.83}
         async def get_recent_closes(self, t, ex, n=5): return [141.83] * 5
         async def get_open_orders(self, t, ex): return [{"ord_no": n} for n in broker_open]
+        async def get_today_orders(self, t, ex):
+            return [{"ord_no": f"N{i}", "ord_stat": "취소"} for i in range(len(placed))
+                    if f"N{i}" not in broker_open]
 
     class N:
         async def send(self, text): sent.append(text)

@@ -43,6 +43,7 @@ from core.market_calendar import (
     is_early_close,
     market_close_kst,
     premarket_open_kst,
+    regular_open_kst,
     upcoming_session,
 )
 from core.order_registry import OrderRegistry
@@ -215,6 +216,14 @@ class SchedulerEngine:
         # 프리장에서 증권사가 거부한 핵심 LOC 매수를 정규장에서 되살린다.
         # 1차 같은 가격 재접수 → 2차 현재가×1.15 대체(방법론 8) → 3차 알림.
         # 거부는 접수 몇 초 뒤에 오므로 단계마다 15분 간격으로 확인한다.
+        # 18:02 에 돈이 모자라 빠진 매수를 자동으로 다시 시도한다.
+        # 원화주문 몫이 프리장 시작 직후엔 덜 잡히는 일이 있었다 (2026-11-05: 18:02 약 $644,
+        # 20:07 에는 $1,000 이상 더 잡힘). 이미 낸 주문·사용자가 취소한 주문은 다시 내지 않는다.
+        jobs += [
+            ("loc_retry_1", sched.submit_loc + _td(minutes=38), self._loc_retry_1),
+            ("loc_retry_2", sched.submit_loc + _td(minutes=88), self._loc_retry_2),
+            ("loc_retry_3", regular_open_kst(session) - _td(minutes=90), self._loc_retry_final),
+        ]
         # (functools.partial 대신 진짜 async 메서드를 넘긴다 — 스케줄러가 코루틴으로 알아보게)
         for i, (mins, fn) in enumerate(((1, self._recover_first), (16, self._recover_second),
                                         (31, self._recover_final)), start=1):
@@ -251,7 +260,18 @@ class SchedulerEngine:
         """LOC/MOC 예약주문 접수"""
         await self._submit(session, SubmitWindow.REGULAR, "LOC 접수")
 
-    async def _submit(self, session: date, window: str, label: str) -> None:
+    async def _loc_retry_1(self, session: date) -> None:
+        await self._submit(session, SubmitWindow.REGULAR, "LOC 자동 재시도", auto_retry=True)
+
+    async def _loc_retry_2(self, session: date) -> None:
+        await self._submit(session, SubmitWindow.REGULAR, "LOC 자동 재시도", auto_retry=True)
+
+    async def _loc_retry_final(self, session: date) -> None:
+        await self._submit(session, SubmitWindow.REGULAR, "LOC 자동 재시도", auto_retry=True,
+                           final_retry=True)
+
+    async def _submit(self, session: date, window: str, label: str,
+                      auto_retry: bool = False, final_retry: bool = False) -> None:
         trade_date = session.strftime("%Y%m%d")
         tickers = self.state_mgr.list_tickers()
 
@@ -269,14 +289,15 @@ class SchedulerEngine:
                 reserve = 0.0
                 if budget is not None:
                     try:
-                        reserve = self._core_reserve(tickers[i + 1:])
+                        reserve = self._core_reserve(tickers[i + 1:], trade_date)
                     except Exception:
                         logger.exception("다른 종목 핵심 매수 몫 계산 실패 — 예약 없이 진행")
                 # 첫 종목은 아직 쓴 돈이 없으니 증권사 금액 그대로 쓴다.
                 # (예산 조회 기준가가 달라 한 주 차이로 핵심 매수가 빠지는 일을 막는다)
                 spent = await self._submit_ticker(
                     ticker, trade_date, window, label, aux_reserve=reserve,
-                    budget=budget if (budget is not None and i > 0) else None)
+                    budget=budget if (budget is not None and i > 0) else None,
+                    auto_retry=auto_retry, final_retry=final_retry)
                 if budget is not None:
                     budget -= spent or 0.0
             except Exception as e:
@@ -286,7 +307,8 @@ class SchedulerEngine:
     #: 하루에 여러 건 나가는 태그 — 태그가 아니라 가격으로 중복을 본다
     MULTI_TAGS = frozenset({FillKind.CRASH_BUY})
 
-    def _drop_already_submitted(self, ticker: str, trade_date: str, orders: list):
+    def _drop_already_submitted(self, ticker: str, trade_date: str, orders: list,
+                                include_cancelled: bool = False):
         """이미 접수한 주문을 뺀다. (남은 주문, 중복으로 본 태그들)
 
         대부분의 태그는 하루 한 건이라 태그로 거른다. 폭락대비는 한 번에
@@ -295,7 +317,8 @@ class SchedulerEngine:
         같은 가격이 이미 있으면 빼고, 전체 건수가 계획보다 많아지지 않게 한다.
         """
         single = [o.tag for o in orders if o.tag not in self.MULTI_TAGS]
-        dup_single = set(self.registry.already_submitted(trade_date, ticker, single))
+        dup_single = set(self.registry.already_submitted(trade_date, ticker, single,
+                                                         include_cancelled=include_cancelled))
         out, dup_tags = [], set(dup_single)
         multi_planned: dict[str, list] = {}
         for o in orders:
@@ -304,7 +327,8 @@ class SchedulerEngine:
             elif o.tag not in dup_single:
                 out.append(o)
         for tag, planned in multi_planned.items():
-            live = self.registry.live_prices(trade_date, ticker, tag)
+            live = self.registry.live_prices(trade_date, ticker, tag,
+                                             include_cancelled=include_cancelled)
             live_set = set(live)
             room = max(0, len(planned) - len(live))
             fresh = [o for o in sorted(planned, key=lambda x: -(x.price or 0))
@@ -317,20 +341,37 @@ class SchedulerEngine:
         out.sort(key=lambda o: order_index[id(o)])
         return out, dup_tags
 
-    def _core_reserve(self, tickers: list) -> float:
-        """뒤에 접수할 종목들의 핵심 매수 예상 금액 (정지 종목 제외)"""
+    def _core_reserve(self, tickers: list, trade_date: str = "") -> float:
+        """뒤에 접수할 종목들의 핵심 매수 예상 금액 (정지 종목 제외).
+
+        그날 핵심 매수를 이미 낸 종목은 빼고 센다. 그 돈은 증권사 주문가능금액에서
+        이미 빠져 있다. 두 번 빼면 /run loc 재접수 때 앞 종목 폭락대비가 통째로
+        빠진다 (실제 2026-11-04: 가능 $391.51 인데 TQQQ 몫 $481.71 을 또 남겨 0건).
+        """
         total = 0.0
         for t in tickers:
             st = self.state_mgr.get_state(t)
             if (st is None or CircuitBreaker.is_halted(st)
                     or getattr(st, "awaiting_principal", False)):
                 continue
+            if trade_date and self._core_already_placed(t, trade_date):
+                continue
             total += max(0.0, _core_or_full(st))
         return round(total, 2)
 
+    def _core_already_placed(self, ticker: str, trade_date: str) -> bool:
+        """그날 핵심 LOC 매수가 접수돼 있거나 체결됐는지"""
+        try:
+            return any(self._is_core_loc_buy(r) and r.status in ("submitted", "partial", "filled")
+                       for r in self.registry.day_orders(trade_date, ticker))
+        except Exception:
+            return False
+
     async def _submit_ticker(self, ticker: str, trade_date: str, window: str, label: str,
                              aux_reserve: float = 0.0,
-                             budget: float | None = None) -> float:
+                             budget: float | None = None,
+                             auto_retry: bool = False,
+                             final_retry: bool = False) -> float:
         """한 종목 접수. 접수한 매수 주문이 묶는 달러를 돌려준다.
 
         aux_reserve  뒤에 접수할 다른 종목의 핵심 매수 몫. 이 종목의
@@ -376,7 +417,8 @@ class SchedulerEngine:
         # 증권사 앱에서 직접 취소한 LOC 를 원장에 반영한다.
         # 반영하지 않으면 원장엔 "접수됨" 으로 남아, 다시 낼 때 아래 중복
         # 방지가 막는다.
-        if not self.config.dry_run:
+        # 자동 재시도에서는 하지 않는다 — 사용자가 앱에서 취소한 주문을 되살리면 안 된다.
+        if not self.config.dry_run and not auto_retry:
             await self._sync_cancelled_loc(ticker, trade_date)
 
         # 중복 접수 방지 — 같은 날 같은 주문을 두 번 내면 포지션이 두 배가 된다.
@@ -384,7 +426,16 @@ class SchedulerEngine:
         # 창구 단위가 아니라 주문 단위로 걸러낸다. 자금 부족으로 매수만
         # 건너뛴 날, 입금 후 /run loc 로 다시 실행하면 이미 낸 매도는 빼고
         # 매수만 접수되어야 한다.
-        orders, dup_tags = self._drop_already_submitted(ticker, trade_date, orders)
+        orders, dup_tags = self._drop_already_submitted(ticker, trade_date, orders,
+                                                        include_cancelled=auto_retry)
+        if auto_retry:
+            # 재시도는 돈이 없어 빠진 매수만. 증권사가 거부한 주문은 정규장 복구
+            # (recover_rejected) 가 맡는다 — 프리장에서 또 내면 또 거부된다.
+            refused = {r.tag for r in self.registry.day_orders(trade_date, ticker)
+                       if r.status == "rejected" and "증권사 거부" in (r.note or "")}
+            orders = [o for o in orders if o.side == "buy" and o.tag not in refused]
+            if not orders:
+                return 0.0                                     # 다 들어가 있다 — 조용히
         if dup_tags:
             logger.info("[%s] %s 중 이미 접수된 주문 제외 (%s)",
                         ticker, label, ", ".join(sorted(dup_tags)))
@@ -420,9 +471,17 @@ class SchedulerEngine:
                 if not alloc.all_placed:
                     keep = {id(o) for o in alloc.placed}
                     orders = [o for o in orders if o.side != "buy" or id(o) in keep]
-                    from core.fx import safe_rate
-                    await self.notifier.send(self._funding_notice(
-                        ticker, alloc, orders, krw_rate=safe_rate(self.state_mgr)))
+                    # 자동 재시도는 새로 들어가는 게 있거나 마지막 시도일 때만 알린다
+                    if not auto_retry or alloc.placed or final_retry:
+                        from core.fx import safe_rate
+                        text = self._funding_notice(
+                            ticker, alloc, orders, krw_rate=safe_rate(self.state_mgr))
+                        diag = await self._krw_diag(ticker, exchange_of(ticker), ref_price)
+                        if diag:
+                            text += "\n" + diag
+                        if auto_retry:
+                            text = f"🔁 {label}\n" + text
+                        await self.notifier.send(text)
                     if not orders:
                         return 0.0
 
@@ -533,6 +592,27 @@ class SchedulerEngine:
         if sells_left:
             L.append("  🔵 매도 주문은 그대로 접수합니다.")
         return "\n".join(L)
+
+    async def _krw_diag(self, ticker: str, exchange: str, price: float) -> str:
+        """부족 알림에 붙일 원화주문 상태 한 줄 — 원화가 언제부터 잡히는지 기록용"""
+        try:
+            bp = await self.kiwoom.get_buying_power(ticker, exchange, price)
+        except Exception:
+            return ""
+        raw = bp.get("raw") or {}
+        try:
+            set_amt = int(str(raw.get("krw_ord_set_amt") or "0").strip() or 0)
+        except ValueError:
+            set_amt = 0
+        if not bp.get("krw_order") and not set_amt:
+            return ""
+        now = datetime.now(KST).strftime("%H:%M")
+        line = (f"  🔎 원화주문 ({now}): 설정 {set_amt:,}원 · 평가 ${bp.get('krw_eval_usd', 0.0):,.2f}"
+                f" · 달러만 ${bp.get('cash_no_margin', 0.0):,.2f}")
+        logger.info("[%s] %s", ticker, line.strip())
+        if set_amt > 0 and float(bp.get("krw_eval_usd") or 0.0) <= 0:
+            line += ("\n     원화는 설정돼 있는데 아직 평가가 0입니다 — 잠시 뒤 자동으로 다시 시도합니다.")
+        return line
 
     async def _ask_principal(self, ticker: str, reminder: bool = False) -> None:
         """새 원금 선택 버튼을 보낸다"""

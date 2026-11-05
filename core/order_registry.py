@@ -299,7 +299,7 @@ class OrderRegistry:
             return [self._row(r) for r in c.execute(sql, args)]
 
     def already_submitted(self, trade_date: str, ticker: str,
-                          tags: Iterable[str]) -> list[str]:
+                          tags: Iterable[str], include_cancelled: bool = False) -> list[str]:
         """해당 거래일에 이미 접수한 태그를 돌려준다.
 
         같은 날 같은 주문을 두 번 내면 포지션이 두 배가 된다.
@@ -309,21 +309,28 @@ class OrderRegistry:
         want = set(tags)
         if not want:
             return []
+        # include_cancelled: 자동 재시도에서는 사용자가 앱에서 취소한 주문을
+        # 되살리지 않도록 취소 건도 '이미 낸 것' 으로 본다.
+        skip = (OrderStatus.REJECTED, "__none__") if include_cancelled else \
+            (OrderStatus.REJECTED, OrderStatus.CANCELLED)
         with self._conn() as c:
             rows = c.execute(
                 "SELECT DISTINCT tag FROM orders WHERE trade_date=? AND ticker=? "
                 "AND status NOT IN (?,?)",
-                (trade_date, ticker.upper(), OrderStatus.REJECTED, OrderStatus.CANCELLED),
+                (trade_date, ticker.upper(), *skip),
             ).fetchall()
         return sorted({r["tag"] for r in rows} & want)
 
-    def live_prices(self, trade_date: str, ticker: str, tag: str) -> list[float]:
+    def live_prices(self, trade_date: str, ticker: str, tag: str,
+                    include_cancelled: bool = False) -> list[float]:
         """해당 거래일에 거부·취소되지 않은 같은 태그 주문들의 가격"""
+        skip = (OrderStatus.REJECTED, "__none__") if include_cancelled else \
+            (OrderStatus.REJECTED, OrderStatus.CANCELLED)
         with self._conn() as c:
             rows = c.execute(
                 "SELECT price FROM orders WHERE trade_date=? AND ticker=? AND tag=? "
                 "AND status NOT IN (?,?)",
-                (trade_date, ticker.upper(), tag, OrderStatus.REJECTED, OrderStatus.CANCELLED),
+                (trade_date, ticker.upper(), tag, *skip),
             ).fetchall()
         return [round(float(r["price"] or 0.0), 2) for r in rows]
 

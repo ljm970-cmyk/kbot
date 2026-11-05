@@ -300,6 +300,30 @@ def test_reserve_error_does_not_block_sells():
     assert any(o.side == "sell" for t, o in placed if t == "TQQQ")
 
 
+def test_rerun_does_not_reserve_for_ticker_already_placed():
+    """/run loc 재접수 — 뒤 종목 핵심 매수가 이미 들어가 있으면 그 몫을 또 남기지 않는다
+    (실제 2026-11-04: 가능 $391.51 인데 TQQQ 몫 $481.71 을 남겨 SOXL 폭락대비 0건)"""
+    eng, placed, sent = _engine(cash=100_000.0, broker_deducts=True)
+    _run(eng)                                          # 두 종목 모두 정상 접수
+    soxl_crash = sorted(o.price for t, o in placed if t == "SOXL" and o.tag == FillKind.CRASH_BUY)
+    assert len(soxl_crash) == len(CRASH_S)
+
+    # SOXL 폭락대비만 원장에서 거부 처리 → 재접수 대상
+    for r in eng.registry.day_orders("20260924", "SOXL"):
+        if r.tag == FillKind.CRASH_BUY:
+            eng.registry.set_status(r.id, "rejected", "테스트")
+    placed.clear()
+
+    async def just_enough(t, ex, price):
+        return sum(CRASH_S) + 1.0                      # 폭락대비만 들어갈 돈 (TQQQ 몫 없음)
+    eng.kiwoom.available_usd = just_enough
+    eng._account_available = lambda: just_enough(None, None, 0)
+    _run(eng)
+    again = [o for t, o in placed if t == "SOXL" and o.tag == FillKind.CRASH_BUY]
+    assert len(again) == len(CRASH_S)
+    assert not any("남겨뒀습니다" in s for s in sent[-3:])
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

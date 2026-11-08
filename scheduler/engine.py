@@ -357,7 +357,13 @@ class SchedulerEngine:
             if trade_date and self._core_already_placed(t, trade_date):
                 continue
             total += max(0.0, _core_or_full(st))
-        return round(total, 2)
+        # 예상치는 전날 정산 때 계산한 값이라 당일 시세(가격제한 대체 등)로 실제
+        # 핵심 매수가 조금 커질 수 있다. 여유를 둔다.
+        # (실제 2026-11-06: 예상 $461.50 · 실제 $483.54 → $19.92 차이로 TQQQ 별지점·평단 빠짐)
+        return round(total * self.CORE_RESERVE_MARGIN, 2)
+
+    #: 다른 종목 핵심 매수 몫을 남길 때의 여유 배율
+    CORE_RESERVE_MARGIN = 1.10
 
     def _core_already_placed(self, ticker: str, trade_date: str) -> bool:
         """그날 핵심 LOC 매수가 접수돼 있거나 체결됐는지"""

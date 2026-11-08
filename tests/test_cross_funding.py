@@ -198,11 +198,25 @@ def test_second_ticker_core_survives_first_ticker_crash():
 
 
 def test_crash_goes_in_when_room_left_after_reserve():
-    eng, placed, _ = _engine(cash=CORE2 + CRASH_S[0] + 1.0)
+    # 뒤 종목 몫은 10% 여유를 두고 남긴다
+    eng, placed, _ = _engine(cash=CORE_S + CORE_Q * 1.10 + CRASH_S[0] + 1.0)
     _run(eng)
     soxl = _tags(placed, "SOXL")
     assert soxl.count(FillKind.CRASH_BUY) == 1
     assert all(t in _tags(placed, "TQQQ") for t in (FillKind.STAR_BUY, FillKind.AVG_BUY))
+
+
+def test_reserve_margin_covers_underestimate():
+    """전날 예상치가 실제보다 작아도(실제 2026-11-06: $461.50 vs $483.54)
+    뒤 종목 별지점·평단이 빠지지 않는다 — 앞 종목 폭락대비가 양보한다"""
+    eng, placed, _ = _engine(cash=CORE2 + CRASH_S[0] + 1.0)
+    st = eng.state_mgr.get_state("TQQQ")
+    st.next_core_need = round(CORE_Q / 1.048, 2)       # 4.8% 낮게 예상
+    eng.state_mgr.save_state(st)
+    _run(eng)
+    tq = _tags(placed, "TQQQ")
+    assert FillKind.STAR_BUY in tq and FillKind.AVG_BUY in tq
+    assert FillKind.CRASH_BUY not in _tags(placed, "SOXL")
 
 
 def test_rich_account_places_everything():

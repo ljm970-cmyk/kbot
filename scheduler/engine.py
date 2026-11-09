@@ -306,6 +306,11 @@ class SchedulerEngine:
 
     #: 하루에 여러 건 나가는 태그 — 태그가 아니라 가격으로 중복을 본다
     MULTI_TAGS = frozenset({FillKind.CRASH_BUY})
+    #: 하루치 본 매수의 여러 모양. 이 중 무엇이든 그날 이미 냈으면 다른 모양으로 또 내지 않는다
+    MAIN_BUY_GROUP = frozenset({FillKind.STAR_BUY, FillKind.AVG_BUY, FillKind.HALF_BUY,
+                                FillKind.ENTRY_BUY, FillKind.GUARD_BUY, FillKind.MERGED_BUY})
+    #: 원래 모양(별지점·평단·후반전·처음매수)을 대신하는 단건
+    MAIN_REPLACEMENTS = frozenset({FillKind.GUARD_BUY, FillKind.MERGED_BUY})
 
     def _drop_already_submitted(self, ticker: str, trade_date: str, orders: list,
                                 include_cancelled: bool = False):
@@ -319,6 +324,18 @@ class SchedulerEngine:
         single = [o.tag for o in orders if o.tag not in self.MULTI_TAGS]
         dup_single = set(self.registry.already_submitted(trade_date, ticker, single,
                                                          include_cancelled=include_cancelled))
+
+        # 그날의 본 매수는 시세에 따라 모양이 바뀐다 — 별지점+평단 / 후반전 단건 /
+        # 가격제한 대체 단건 / 합친 단건. 같은 하루치 매수인데 태그가 달라, 다시 계산한
+        # 계획이 다른 모양이면 '빠진 주문' 으로 보고 한 번 더 냈다
+        # (실제 2026-11-09 TQQQ: 18:02 대체 8주 접수 → 22:00 재시도가 별지점 4 + 평단 4 를 또 내려 함).
+        # 대체·합친 단건이 이미 있으면 본 매수 전부를, 원래 모양이 이미 있으면 대체·합친 단건을 뺀다.
+        placed_main = set(self.registry.already_submitted(
+            trade_date, ticker, list(self.MAIN_BUY_GROUP), include_cancelled=include_cancelled))
+        if placed_main & self.MAIN_REPLACEMENTS:
+            dup_single |= {t for t in single if t in self.MAIN_BUY_GROUP}
+        elif placed_main:
+            dup_single |= {t for t in single if t in self.MAIN_REPLACEMENTS}
         out, dup_tags = [], set(dup_single)
         multi_planned: dict[str, list] = {}
         for o in orders:

@@ -218,6 +218,50 @@ def test_retry_leaves_broker_rejected_to_recovery():
     assert not any(o.tag == FillKind.STAR_BUY for o in placed)
 
 
+
+def _loc(tag, qty, price):
+    return PlannedOrder(tag=tag, side="buy", trade_type=TradeType.LOC, qty=qty, price=price)
+
+
+def test_retry_does_not_rebuy_after_guard_buy_placed():
+    """실제 2026-11-09 TQQQ: 18:02 에 가격제한 대체 단건(8주)이 나갔는데
+    22:00 재시도가 바뀐 시세로 별지점 4 + 평단 4 를 다시 계산해 또 내려 했다."""
+    eng, placed, sent, wallet, live = _engine(cash=100_000.0)
+    rid = eng.registry.record_submission("20261105", "SOXL", _loc(FillKind.GUARD_BUY, 8, 160.0), ord_no="G1")
+    live.add("G1")
+    asyncio.run(eng._loc_retry_1(DAY))
+    main = {FillKind.STAR_BUY, FillKind.AVG_BUY, FillKind.HALF_BUY, FillKind.ENTRY_BUY,
+            FillKind.GUARD_BUY, FillKind.MERGED_BUY}
+    assert not any(o.tag in main for o in placed), [o.tag for o in placed]
+    assert rid
+
+
+def test_star_avg_placed_blocks_guard_variant():
+    eng, *_ = _engine(cash=100_000.0)
+    eng.registry.record_submission("20261105", "SOXL", _loc(FillKind.STAR_BUY, 4, 150.0), ord_no="S1")
+    out, dup = eng._drop_already_submitted("SOXL", "20261105", [_loc(FillKind.GUARD_BUY, 8, 160.0)])
+    assert out == [] and FillKind.GUARD_BUY in dup
+
+
+def test_half_placed_star_still_completes_avg():
+    """별지점만 들어가고 평단이 빠졌으면 평단은 채운다 (모양이 같을 때는 태그별)"""
+    eng, *_ = _engine(cash=100_000.0)
+    eng.registry.record_submission("20261105", "SOXL", _loc(FillKind.STAR_BUY, 4, 150.0), ord_no="S1")
+    plan = [_loc(FillKind.STAR_BUY, 4, 150.0), _loc(FillKind.AVG_BUY, 4, 145.0)]
+    out, _ = eng._drop_already_submitted("SOXL", "20261105", plan)
+    assert [o.tag for o in out] == [FillKind.AVG_BUY]
+
+
+def test_rejected_guard_does_not_block_core():
+    """증권사가 거부한 대체 단건은 이미 낸 것으로 보지 않는다 (복구 흐름 몫)"""
+    eng, *_ = _engine(cash=100_000.0)
+    rid = eng.registry.record_submission("20261105", "SOXL", _loc(FillKind.GUARD_BUY, 8, 160.0), ord_no="G1")
+    eng.registry.set_status(rid, "rejected", "거부")
+    plan = [_loc(FillKind.STAR_BUY, 4, 150.0)]
+    out, _ = eng._drop_already_submitted("SOXL", "20261105", plan)
+    assert [o.tag for o in out] == [FillKind.STAR_BUY]
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

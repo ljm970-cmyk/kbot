@@ -91,7 +91,7 @@ def test_plan_day_registers_all_jobs():
     ids = set(eng.scheduler.jobs)
     for want in ("submit_target_sell", "submit_loc_orders", "verify_reserved", "verify_after_open",
                  "run_eod", "funding_reminder", "loc_retry_1", "loc_retry_2", "loc_retry_3",
-                 "recover_rejected_1", "recover_rejected_2", "recover_rejected_3"):
+                 "recover_rejected_1", "recover_rejected_2", "recover_rejected_3", "final_check"):
         assert want in ids, want
     import inspect
     for fn, _, _ in eng.scheduler.jobs.values():
@@ -105,6 +105,7 @@ def test_plan_day_registers_all_jobs():
     assert len(follows) >= 8
     assert follows[0] > t["verify_after_open"] and follows[0] > regular_open_kst(date(2030, 1, 2))
     assert follows[-1] <= market_close_kst(date(2030, 1, 2)) - E.timedelta(minutes=25)
+    assert follows[-1] < t["final_check"] < market_close_kst(date(2030, 1, 2))
 
 
 # ================================================================
@@ -272,7 +273,8 @@ def test_rejected_guard_does_not_block_core():
 # 장중 가격제한 대체 주문 따라잡기
 # ================================================================
 
-def _follow_engine(cur, guard_price=138.00, guard_qty=3, cancel_ok=True, gone=True, reject=()):
+def _follow_engine(cur, guard_price=138.00, guard_qty=3, cancel_ok=True, gone=True, reject=(),
+                   seed_guard=True, prev_close=120.0):
     """전반전 T=2, 평단 149.10 — 별지점 매수가 175.93, 평단 149.10, 1회 500달러.
     18:02 현재가 120 → 대체 138.00 3주가 나가 있는 상태."""
     from scheduler.engine import SchedulerEngine
@@ -284,12 +286,14 @@ def _follow_engine(cur, guard_price=138.00, guard_qty=3, cancel_ok=True, gone=Tr
     st.T, st.holdings, st.avg_price = 2.0, 6, 149.10
     sm.save_state(st)
     reg = OrderRegistry(d / "o.db")
-    reg.record_submission("20261109", "SOXL", _loc(FillKind.GUARD_BUY, guard_qty, guard_price), ord_no="G1")
-    live = {"G1"}
+    live = set()
+    if seed_guard:
+        reg.record_submission("20261109", "SOXL", _loc(FillKind.GUARD_BUY, guard_qty, guard_price), ord_no="G1")
+        live.add("G1")
     log = []
 
     class K:
-        async def get_quote(self, t, ex): return {"cur_price": cur, "prev_close": 120.0}
+        async def get_quote(self, t, ex): return {"cur_price": eng.cur, "prev_close": prev_close}
         async def get_recent_closes(self, t, ex, n=5): return [120.0] * 5
         async def get_open_orders(self, t, ex): return [{"ord_no": n} for n in live]
 
@@ -320,6 +324,7 @@ def _follow_engine(cur, guard_price=138.00, guard_qty=3, cancel_ok=True, gone=Tr
     eng.kiwoom, eng.notifier = K(), N()
     eng.config = type("C", (), {"dry_run": False})()
     eng._cancel_waits = (0,)
+    eng.cur = cur
     return eng, log, sent, live
 
 
@@ -417,6 +422,98 @@ def test_follow_does_not_churn_after_rejection():
     n = len(log)
     asyncio.run(eng._follow_ticker("SOXL", "20261109"))
     assert len(log) == n
+
+
+
+# ---- 거부 복구 2단계 주문 따라잡기 ----
+
+def _seed_r2(eng, live, r2_price, r2_qty):
+    """11/4 형태: 별지점 3주 @72.55 프리장 거부 → 개장 1차 재접수 거부 → 2차 현재가×1.15"""
+    reg = eng.registry
+    a = reg.record_submission("20261109", "SOXL", _loc(FillKind.STAR_BUY, 3, 72.55), ord_no="S0")
+    reg.set_status(a, "rejected", "별지점 · 증권사 거부")
+    b = reg.record_submission("20261109", "SOXL", _loc(FillKind.STAR_BUY, 3, 72.55), ord_no="S1")
+    reg.set_status(b, "rejected", "정규장 재접수 · 증권사 거부")
+    o = _loc(FillKind.STAR_BUY, r2_qty, r2_price)
+    o.note = eng.R2
+    reg.record_submission("20261109", "SOXL", o, ord_no="R2")
+    live.add("R2")
+
+
+def test_follow_recovered_order_raised_but_capped_at_original():
+    eng, log, sent, live = _follow_engine(cur=56.0, seed_guard=False)
+    _seed_r2(eng, live, 60.00, 3)
+    asyncio.run(eng._follow_ticker("SOXL", "20261109"))
+    assert log[0] == ("cancel", "R2")
+    assert _buys(log) == [("buy", 3, 64.4)]                 # 56×1.15, 금액 217.65 ÷ 64.4
+    live_rows = [r for r in eng.registry.day_orders("20261109", "SOXL") if r.status == "submitted"]
+    assert [r.tag for r in live_rows] == [FillKind.STAR_BUY]  # 태그 유지 (T +0.5)
+    # 더 오르면 원래 가격에서 멈춘다
+    eng.cur = 66.0
+    asyncio.run(eng._follow_ticker("SOXL", "20261109"))
+    assert _buys(log)[-1] == ("buy", 3, 72.55)
+    n = len(log)
+    eng.cur = 80.0
+    asyncio.run(eng._follow_ticker("SOXL", "20261109"))
+    assert len(log) == n                                    # 원래 가격을 넘지 않는다
+    assert any("원래 가격으로 다시 냈습니다" in x for x in sent)
+
+
+def test_follow_recovered_order_left_when_safe():
+    eng, log, sent, live = _follow_engine(cur=52.0, seed_guard=False)
+    _seed_r2(eng, live, 60.00, 3)                           # 52×1.08 = 56.2 < 60
+    asyncio.run(eng._follow_ticker("SOXL", "20261109"))
+    assert log == []
+
+
+# ---- 장중 급락 알림 ----
+
+def test_drop_alert_once_per_level():
+    eng, log, sent, live = _follow_engine(cur=105.0, prev_close=120.0)   # -12.5%
+    for p, n in ((131.57, "C1"), (105.26, "C2"), (87.71, "C3")):
+        eng.registry.record_submission("20261109", "SOXL", _loc(FillKind.CRASH_BUY, 1, p), ord_no=n)
+    asyncio.run(eng._drop_alert("SOXL", "20261109"))
+    assert len(sent) == 1 and "-12.5%" in sent[0]
+    assert "폭락대비 2/3건" in sent[0] and "guard_buy 3주 @138.00" in sent[0]
+    assert log == []                                        # 주문은 건드리지 않는다
+    asyncio.run(eng._drop_alert("SOXL", "20261109"))
+    assert len(sent) == 1                                   # 같은 단계는 한 번만
+    eng.cur = 100.0                                         # -16.7%
+    asyncio.run(eng._drop_alert("SOXL", "20261109"))
+    assert len(sent) == 2 and "-16.7%" in sent[1]
+
+
+def test_drop_alert_quiet_on_small_move():
+    eng, log, sent, _ = _follow_engine(cur=110.0, prev_close=120.0)      # -8.3%
+    asyncio.run(eng._drop_alert("SOXL", "20261109"))
+    assert sent == []
+
+
+# ---- 마감 전 최종 점검 ----
+
+def test_final_check_quiet_when_core_buy_live():
+    eng, log, sent, _ = _follow_engine(cur=125.0)
+    asyncio.run(eng._final_check_ticker("SOXL", "20261109"))
+    assert sent == []
+
+
+def test_final_check_alerts_when_core_buy_missing():
+    eng, log, sent, _ = _follow_engine(cur=125.0, seed_guard=False)
+    asyncio.run(eng._final_check_ticker("SOXL", "20261109"))
+    assert len(sent) == 1 and "본 매수가 미체결에 없습니다" in sent[0] and "guard_buy" in sent[0]
+    assert log == []                                        # 알림만
+
+
+def test_final_check_reports_vanished_order():
+    eng, log, sent, live = _follow_engine(cur=125.0)
+    live.discard("G1")                                      # 장중에 미체결에서 사라짐
+    eng._broker_stats = lambda t: _async({})
+    asyncio.run(eng._final_check_ticker("SOXL", "20261109"))
+    assert any("사라졌습니다" in x and "마감 직전" in x for x in sent)
+
+
+async def _async(v):
+    return v
 
 
 if __name__ == "__main__":

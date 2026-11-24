@@ -589,6 +589,37 @@ def test_final_check_no_rescue_without_rejection():
     assert any("/run loc" in x for x in sent)
 
 
+
+def test_intraday_check_rescues_late_rejection_at_next_round():
+    """11/23 TQQQ 재현: 00:15 원래 주문이 접수 뒤 거부 → 원장은 아직 '접수' 로 안다.
+    다음 30분 점검에서 미체결에 없는 걸 보고 거부를 확인해 바로 다시 낸다 (05:40 까지 기다리지 않는다)."""
+    eng, log, sent, live = _follow_engine(cur=150.0, seed_guard=False)
+    eng.registry.record_submission("20261109", "SOXL", _loc(FillKind.HALF_BUY, 1, 175.93), ord_no="H1")
+    eng.late_reject.add("H1")                               # 미체결(live)에 없음 + 당일주문 '거부'
+    asyncio.run(eng._final_check_ticker("SOXL", "20261109", intraday=True))
+    rows = eng.registry.day_orders("20261109", "SOXL")
+    assert next(r for r in rows if r.ord_no == "H1").status == "rejected"
+    assert _buys(log) == [("buy", 2, 172.5)] or _buys(log)[0][2] <= 175.93
+    assert [r.tag for r in rows if r.status == "submitted"] == [FillKind.GUARD_BUY]
+    assert any("장중 점검" in x and "다시 냈습니다" in x for x in sent)
+
+
+def test_intraday_check_quiet_without_rejection():
+    eng, log, sent, _ = _follow_engine(cur=150.0, seed_guard=False)
+    asyncio.run(eng._final_check_ticker("SOXL", "20261109", intraday=True))
+    assert log == [] and sent == []                         # 아무것도 없으면 장중엔 조용 (마감 전에만 알림)
+
+
+def test_intraday_rescue_does_not_repeat_after_its_own_rejection():
+    eng, log, sent, _ = _follow_engine(cur=150.0, seed_guard=False, reject=(172.5,))
+    rid = eng.registry.record_submission("20261109", "SOXL", _loc(FillKind.STAR_BUY, 1, 175.93), ord_no="X1")
+    eng.registry.set_status(rid, "rejected", "증권사 거부")
+    asyncio.run(eng._final_check_ticker("SOXL", "20261109", intraday=True))
+    n = len(log)
+    asyncio.run(eng._final_check_ticker("SOXL", "20261109", intraday=True))
+    assert len(log) == n
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

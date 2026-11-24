@@ -916,7 +916,7 @@ class SchedulerEngine:
             return "cancelled"
         return "unknown"
 
-    async def _verify_live(self, ticker: str, final: bool = False) -> None:
+    async def _verify_live(self, ticker: str, final: bool = False, intraday: bool = False) -> None:
         """봇이 낸 실시간 주문이 미체결에 살아 있는지 확인한다.
 
         LOC 는 종가에만 체결되므로 장중에 미체결에서 사라졌다면 거부됐거나
@@ -947,17 +947,24 @@ class SchedulerEngine:
         stats = await self._broker_stats(ticker)
         lines = [f"⚠️ [{ticker}] LOC 주문 {len(missing)}건이 미체결에서 사라졌습니다"]
         any_core_buy = False
+        shown = 0
         for r in missing:
             kind = self._mark_gone(r, stats)
+            if intraday and kind == "unknown":
+                continue                             # 30분마다 같은 '확인 불가' 를 되풀이하지 않는다
+            shown += 1
             side = "🔴 매수" if r.side == "buy" else "🔵 매도"
             word = {"rejected": "증권사 거부", "cancelled": "취소됨"}.get(
                 kind, "상태 확인 불가 — 그대로 둡니다")
             lines.append(f"  {side} {r.qty}주 @{r.price:.2f} [{r.tag}] — {word}")
             if kind == "rejected" and self._is_core_loc_buy(r):
                 any_core_buy = True
-        if final:
-            lines.append("  마감 직전이라 봇은 다시 내지 않습니다. 필요하면 LOC 접수 마감 전에"
-                         " /run loc 로 다시 내거나 앱에서 확인하세요.")
+        if not shown:
+            return
+        if any_core_buy and (final or intraday):
+            lines.append("  거부된 본 매수는 봇이 바로 현재가×1.15 (원래 가격 이하) 로 다시 냅니다.")
+        elif final:
+            lines.append("  마감 직전입니다. 필요하면 앱에서 확인하세요.")
         elif any_core_buy:
             lines.append("  거부된 별지점·평단 매수는 정규장에서 자동으로 다시 냅니다"
                          " (같은 가격 → 현재가×1.15 대체).")
@@ -1155,6 +1162,11 @@ class SchedulerEngine:
             return                                   # 늦게 깨어난 작업 — 마감 직전엔 건드리지 않는다
         trade_date = session.strftime("%Y%m%d")
         for ticker in self.state_mgr.list_tickers():
+            try:
+                # 거부로 빠진 본 매수가 있으면 먼저 되살린다 (11/23 TQQQ: 00:15 거부 → 05:40 까지 방치)
+                await self._final_check_ticker(ticker, trade_date, intraday=True)
+            except Exception:
+                logger.exception("[%s] 장중 점검 실패", ticker)
             try:
                 await self._follow_ticker(ticker, trade_date)
             except Exception:
@@ -1430,13 +1442,18 @@ class SchedulerEngine:
             except Exception:
                 logger.exception("[%s] 마감 전 점검 실패", ticker)
 
-    async def _final_check_ticker(self, ticker: str, trade_date: str) -> None:
+    async def _final_check_ticker(self, ticker: str, trade_date: str, intraday: bool = False) -> None:
+        """본 매수가 살아 있는지 확인하고, 증권사 거부로 빠졌으면 다시 낸다.
+
+        장중 30분마다(intraday) 와 마감 20분 전(final) 에 돈다. 장중에는 거부로 빠진
+        경우에만 움직이고 조용하다 — 자금 부족·직접 취소 알림은 마감 전 한 번만.
+        """
         state = self.state_mgr.get_state(ticker)
         if state is None or CircuitBreaker.is_halted(state):
             return
         if getattr(state, "awaiting_principal", False) and state.holdings <= 0:
             return
-        await self._verify_live(ticker, final=True)      # 사라진 주문 알림
+        await self._verify_live(ticker, final=not intraday, intraday=intraday)   # 사라진 주문 알림
         # 본 매수가 하나도 살아 있지 않은데 계획상 있어야 하면 알린다
         core_tags = set(self.MAIN_BUY_GROUP) | {FillKind.REVERSE_QUARTER_BUY}
         rows = self.registry.day_orders(trade_date, ticker)
@@ -1445,6 +1462,9 @@ class SchedulerEngine:
             return
         if any(self.R3 in (r.note or "") for r in rows):
             return                                        # 이미 포기 알림을 보냈다
+        if any(r.status == "rejected" and any(k in (r.note or "") for k in ("자동 복구", "원래 주문 복구"))
+               for r in rows):
+            return                                        # 다시 낸 것까지 거부됐다 — 30분마다 되풀이하지 않는다
         market = await self._market_snapshot(ticker, state.mode)
         mode = ReverseMode(state) if state.mode == "reverse" else NormalMode(state)
         expected = [o for o in mode.plan(market).orders
@@ -1456,6 +1476,8 @@ class SchedulerEngine:
                               for r in rows)
         if not broker_rejected:
             # 거부 기록이 없다 — 자금 부족·직접 취소 등. 봇이 판단할 일이 아니다
+            if intraday:
+                return
             await self.notifier.send(
                 f"🚨 [{ticker}] 마감 전 점검: 오늘 본 매수가 미체결에 없습니다.\n"
                 f"  지금 시세 기준 계획: {exp}\n"
@@ -1464,6 +1486,7 @@ class SchedulerEngine:
         # 증권사가 거부해서 빠졌다 — 받아주는 가격(현재가×1.15, 원래 가격 이하)으로 자동으로 다시 낸다.
         # 같은 가격으로 /run loc 를 돌려 봐야 또 거부된다 (11/23 TQQQ).
         from core.star_point import round_half_up
+        label = "장중 점검" if intraday else "마감 전 점검"
         cur = float(market.current_price or 0.0)
         cap = max(float(o.price) for o in expected)
         price = min(round_half_up(cur * 1.15, 2), round_half_up(cap, 2))
@@ -1471,25 +1494,25 @@ class SchedulerEngine:
         qty = int(amount / price + 1e-9) if price > 0 else 0
         if cur <= 0 or qty < 1:
             await self.notifier.send(
-                f"🚨 [{ticker}] 마감 전 점검: 오늘 본 매수가 증권사 거부로 빠졌습니다. 다시 낼 가격을 "
+                f"🚨 [{ticker}] {label}: 오늘 본 매수가 증권사 거부로 빠졌습니다. 다시 낼 가격을 "
                 f"정하지 못했습니다 — 앱에서 확인하세요. (계획: {exp})")
             return
         order = PlannedOrder(tag=FillKind.GUARD_BUY, side="buy", trade_type=TradeType.LOC, qty=qty,
-                             price=price, note=f"마감 전 자동 복구 · 현재가 {cur:.2f}")
+                             price=price, note=f"{label} 자동 복구 · 현재가 {cur:.2f}")
         rid = self.registry.record_submission(trade_date, ticker, order)
         exchange = exchange_of(ticker)
         try:
             res = await self.kiwoom.buy(ticker, exchange, qty, TradeType.LOC, price)
         except KiwoomAPIError as e:
-            self.registry.set_status(rid, "rejected", f"마감 전 자동 복구 · 증권사 거부: {e}")
+            self.registry.set_status(rid, "rejected", f"{label} 자동 복구 · 증권사 거부: {e}")
             await self.notifier.send(
-                f"🚨 [{ticker}] 마감 전 점검: 거부로 빠진 본 매수를 {qty}주 LOC @{price:.2f} 로 다시 냈지만 "
+                f"🚨 [{ticker}] {label}: 거부로 빠진 본 매수를 {qty}주 LOC @{price:.2f} 로 다시 냈지만 "
                 f"또 거부됐습니다 ({str(e)[:60]}). 오늘 본 매수는 없습니다.")
             return
         except Exception as e:
-            self.registry.set_status(rid, "submitted", f"마감 전 자동 복구 · 결과 불명: {e}")
+            self.registry.set_status(rid, "submitted", f"{label} 자동 복구 · 결과 불명: {e}")
             await self.notifier.send(
-                f"🚨 [{ticker}] 마감 전 자동 복구 주문 결과를 확인할 수 없습니다 ({qty}주 @{price:.2f}). "
+                f"🚨 [{ticker}] {label} 자동 복구 주문 결과를 확인할 수 없습니다 ({qty}주 @{price:.2f}). "
                 f"앱 미체결을 확인하세요.")
             return
         no = getattr(res, "ord_no", "") or ""
@@ -1497,11 +1520,11 @@ class SchedulerEngine:
             self.registry.attach_ord_no(rid, no)
         if await self._late_rejections(ticker, [(order, rid, no)]):
             await self.notifier.send(
-                f"🚨 [{ticker}] 마감 전 점검: 거부로 빠진 본 매수를 {qty}주 LOC @{price:.2f} 로 다시 냈지만 "
+                f"🚨 [{ticker}] {label}: 거부로 빠진 본 매수를 {qty}주 LOC @{price:.2f} 로 다시 냈지만 "
                 f"접수 뒤 또 거부됐습니다. 오늘 본 매수는 없습니다.")
             return
         await self.notifier.send(
-            f"🛠 [{ticker}] 마감 전 점검: 본 매수가 증권사 거부로 빠져 있어 자동으로 다시 냈습니다.\n"
+            f"🛠 [{ticker}] {label}: 본 매수가 증권사 거부로 빠져 있어 자동으로 다시 냈습니다.\n"
             f"  guard_buy {qty}주 LOC @{price:.2f} (현재가 {cur:.2f}×1.15, 원래 {exp})")
 
     # ------------------------------------------------------------

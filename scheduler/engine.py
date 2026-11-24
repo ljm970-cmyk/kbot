@@ -1120,8 +1120,15 @@ class SchedulerEngine:
     FINAL_CHECK_MIN = 20
     #: 장중 급락 알림 단계 (전일종가 대비)
     DROP_LEVELS = (-0.10, -0.15, -0.20, -0.25, -0.30)
+    #: 원래 주문으로 되돌리는 건 원래 가격이 현재가의 이 배수 이하일 때만.
+    #: 키움 실측 — 현재가 +17% LOC 는 장중 접수·체결(11/9 TQQQ), +22.7% 는 접수 직후
+    #: 증권사 거부(11/23 TQQQ 60.55 vs 49.34). 그 사이에서 안전하게 18%.
+    FOLLOW_REVERT_MAX = 1.18
     #: 취소가 미체결에서 빠지는지 확인하는 간격(초)
     _cancel_waits = (2, 3, 5)
+    #: 새 주문이 접수 뒤 증권사에서 거부되는지 지켜보는 간격(초).
+    #: 키움은 주문 API 가 주문번호를 돌려준 뒤에 '거부' 로 바꾸기도 한다
+    _reject_waits = (3, 5, 12)
 
     async def follow_guard(self, session: date) -> None:
         """장중 30분마다: 가격제한 대체·거부 복구 주문 따라잡기 + 급락 알림.
@@ -1190,15 +1197,27 @@ class SchedulerEngine:
                    if o.side == "buy" and o.tag in self.MAIN_BUY_GROUP]
             if not new:
                 return
+            from core.star_point import round_half_up
+            raised = self._guard_at(cur, sum(float(o.price) * int(o.qty) for o in new))
             if any(o.tag == FillKind.GUARD_BUY for o in new):
                 # 여전히 대체 — 더 높을 때만 (내리지 않는다)
                 if len(new) != 1 or float(new[0].price or 0) <= float(old.price or 0):
                     return
                 why = "대체가를 현재가×1.15 로 올렸습니다"
+                fallback = old
+            elif max(float(o.price or 0) for o in new) > round_half_up(cur * self.FOLLOW_REVERT_MAX, 2):
+                # 대체 기준(25%)은 벗어났지만 원래 가격이 현재가보다 18% 넘게 위 —
+                # 키움이 거부하는 구간이다. 원래 주문 대신 대체가만 올린다.
+                if raised is None or raised.price <= float(old.price or 0):
+                    return
+                new = [raised]
+                why = "대체가를 현재가×1.15 로 올렸습니다 (원래 가격은 아직 거부 구간)"
+                fallback = old
             else:
                 if max(float(o.price or 0) for o in new) <= float(old.price or 0):
                     return                           # 원래 주문이 대체가보다 낮다 — 나아질 게 없다
                 why = "대체가 필요 없어져 원래 주문으로 되돌렸습니다"
+                fallback = raised if (raised and raised.price > float(old.price or 0)) else old
             new = [PlannedOrder(tag=o.tag, side="buy", trade_type=TradeType.LOC, qty=o.qty,
                                 price=o.price, note=f"{self.FOLLOW_MARK} · {o.note}") for o in new]
             what = "대체 주문"
@@ -1223,9 +1242,38 @@ class SchedulerEngine:
             new = [PlannedOrder(tag=old.tag, side="buy", trade_type=TradeType.LOC, qty=qty,
                                 price=price, note=f"{self.FOLLOW_MARK} · {self.R2}")]
             what = f"거부 복구 주문({old.tag})"
-        await self._follow_swap(ticker, exchange, trade_date, old, new, cur, what, why)
+            fallback = old
+        await self._follow_swap(ticker, exchange, trade_date, old, new, cur, what, why, fallback)
 
-    async def _follow_swap(self, ticker, exchange, trade_date, old, new, cur, what, why) -> None:
+    def _guard_at(self, cur: float, amount: float):
+        """현재가×1.15 대체 단건 (금액 기준 수량). 1주도 안 되면 None"""
+        from core.star_point import round_half_up
+        price = round_half_up(cur * 1.15, 2)
+        qty = int(amount / price + 1e-9) if price > 0 else 0
+        if qty < 1:
+            return None
+        return PlannedOrder(tag=FillKind.GUARD_BUY, side="buy", trade_type=TradeType.LOC, qty=qty,
+                            price=price, note=f"{self.FOLLOW_MARK} · 현재가 {cur:.2f}×1.15 단건")
+
+    async def _late_rejections(self, ticker: str, placed: list) -> list:
+        """접수된 주문 중 뒤늦게 증권사가 거부한 것 [(order, rid)]. 원장도 거부로 적는다"""
+        from core.order_registry import normalize_ord_no
+        if not placed:
+            return []
+        for w in self._reject_waits:
+            if w:
+                await asyncio.sleep(w)
+            stats = await self._broker_stats(ticker)
+            bad = [(o, rid, no) for o, rid, no in placed
+                   if no and "거부" in stats.get(normalize_ord_no(no), "")]
+            if bad:
+                for o, rid, no in bad:
+                    self.registry.set_status(rid, "rejected", f"{self.FOLLOW_MARK} · 접수 뒤 증권사 거부")
+                return [(o, rid) for o, rid, _ in bad]
+        return []
+
+    async def _follow_swap(self, ticker, exchange, trade_date, old, new, cur, what, why,
+                           fallback=None) -> None:
         # 1) 기존 주문 취소
         try:
             await self.kiwoom.cancel(old.ord_no, ticker, exchange)
@@ -1271,9 +1319,16 @@ class SchedulerEngine:
                     f"🚨 [{ticker}] {self.FOLLOW_MARK} 주문 결과를 확인할 수 없습니다 "
                     f"({order.qty}주 @{order.price:.2f}). 앱 미체결을 확인하세요. 더 내지 않습니다.")
                 return
-            if getattr(res, "ord_no", ""):
-                self.registry.attach_ord_no(rid, res.ord_no)
-            placed.append(order)
+            no = getattr(res, "ord_no", "") or ""
+            if no:
+                self.registry.attach_ord_no(rid, no)
+            placed.append((order, rid, no))
+
+        # 주문번호를 받고도 잠시 뒤 거부되는 경우가 있다 (11/23 TQQQ) — 지켜본다
+        for o, _rid in await self._late_rejections(ticker, placed):
+            rejected.append((o, "접수 뒤 증권사 거부"))
+        late = {id(o) for o, _ in rejected}
+        placed = [o for o, _rid, _no in placed if id(o) not in late]
 
         def _fmt(os_):
             return "\n".join(f"  {o.tag} {o.qty}주 LOC @{o.price:.2f}" for o in os_)
@@ -1285,24 +1340,26 @@ class SchedulerEngine:
             return
 
         if not placed:
-            # 새 주문이 전부 거부 — 원래 주문을 그대로 되살린다
-            back = PlannedOrder(tag=old.tag, side="buy", trade_type=TradeType.LOC,
-                                qty=old.qty, price=old.price,
-                                note=f"{old.note or ''} · {self.FOLLOW_MARK} 실패 후 복구".strip(" ·"))
+            # 새 주문이 전부 거부 — 받아줄 만한 주문(현재가×1.15 대체, 아니면 원래 주문)으로 되살린다
+            fb = fallback or old
+            back = PlannedOrder(tag=fb.tag, side="buy", trade_type=TradeType.LOC,
+                                qty=fb.qty, price=fb.price,
+                                note=f"{fb.note or ''} · {self.FOLLOW_MARK} 실패 후 복구".strip(" ·"))
             rid = self.registry.record_submission(trade_date, ticker, back)
             try:
                 res = await self.kiwoom.buy(ticker, exchange, back.qty, back.trade_type, back.price)
-                if getattr(res, "ord_no", ""):
-                    self.registry.attach_ord_no(rid, res.ord_no)
-                ok = True
+                no = getattr(res, "ord_no", "") or ""
+                if no:
+                    self.registry.attach_ord_no(rid, no)
+                ok = not await self._late_rejections(ticker, [(back, rid, no)])
             except KiwoomAPIError as e:
                 self.registry.set_status(rid, "rejected", f"원래 주문 복구 · 증권사 거부: {e}")
                 ok = False
             except Exception as e:
                 self.registry.set_status(rid, "submitted", f"원래 주문 복구 · 결과 불명: {e}")
                 ok = None
-            tail = {True: f"원래 주문({old.qty}주 @{old.price:.2f})을 다시 냈습니다.",
-                    False: "원래 주문도 거부됐습니다. 오늘 본 매수가 없습니다 — 앱에서 확인하세요.",
+            tail = {True: f"{back.tag} {back.qty}주 LOC @{back.price:.2f} 로 다시 냈습니다.",
+                    False: "다시 낸 주문도 거부됐습니다. 오늘 본 매수가 없습니다 — 앱에서 확인하세요.",
                     None: "원래 주문을 다시 냈는데 결과를 확인할 수 없습니다 — 앱 미체결을 확인하세요."}[ok]
             await self.notifier.send(
                 f"⚠️ [{ticker}] 장중 따라잡기 새 주문이 거부됐습니다 ({rejected[0][1][:60]}).\n  {tail}")
@@ -1395,10 +1452,57 @@ class SchedulerEngine:
         if not expected:
             return
         exp = ", ".join(f"{o.tag} {o.qty}주 @{o.price:.2f}" for o in expected)
+        broker_rejected = any(r.tag in core_tags and r.side == "buy" and r.status == "rejected"
+                              for r in rows)
+        if not broker_rejected:
+            # 거부 기록이 없다 — 자금 부족·직접 취소 등. 봇이 판단할 일이 아니다
+            await self.notifier.send(
+                f"🚨 [{ticker}] 마감 전 점검: 오늘 본 매수가 미체결에 없습니다.\n"
+                f"  지금 시세 기준 계획: {exp}\n"
+                f"  LOC 접수 마감 전에 /run loc 로 다시 내거나 앱에서 확인하세요.")
+            return
+        # 증권사가 거부해서 빠졌다 — 받아주는 가격(현재가×1.15, 원래 가격 이하)으로 자동으로 다시 낸다.
+        # 같은 가격으로 /run loc 를 돌려 봐야 또 거부된다 (11/23 TQQQ).
+        from core.star_point import round_half_up
+        cur = float(market.current_price or 0.0)
+        cap = max(float(o.price) for o in expected)
+        price = min(round_half_up(cur * 1.15, 2), round_half_up(cap, 2))
+        amount = sum(float(o.price) * int(o.qty) for o in expected)
+        qty = int(amount / price + 1e-9) if price > 0 else 0
+        if cur <= 0 or qty < 1:
+            await self.notifier.send(
+                f"🚨 [{ticker}] 마감 전 점검: 오늘 본 매수가 증권사 거부로 빠졌습니다. 다시 낼 가격을 "
+                f"정하지 못했습니다 — 앱에서 확인하세요. (계획: {exp})")
+            return
+        order = PlannedOrder(tag=FillKind.GUARD_BUY, side="buy", trade_type=TradeType.LOC, qty=qty,
+                             price=price, note=f"마감 전 자동 복구 · 현재가 {cur:.2f}")
+        rid = self.registry.record_submission(trade_date, ticker, order)
+        exchange = exchange_of(ticker)
+        try:
+            res = await self.kiwoom.buy(ticker, exchange, qty, TradeType.LOC, price)
+        except KiwoomAPIError as e:
+            self.registry.set_status(rid, "rejected", f"마감 전 자동 복구 · 증권사 거부: {e}")
+            await self.notifier.send(
+                f"🚨 [{ticker}] 마감 전 점검: 거부로 빠진 본 매수를 {qty}주 LOC @{price:.2f} 로 다시 냈지만 "
+                f"또 거부됐습니다 ({str(e)[:60]}). 오늘 본 매수는 없습니다.")
+            return
+        except Exception as e:
+            self.registry.set_status(rid, "submitted", f"마감 전 자동 복구 · 결과 불명: {e}")
+            await self.notifier.send(
+                f"🚨 [{ticker}] 마감 전 자동 복구 주문 결과를 확인할 수 없습니다 ({qty}주 @{price:.2f}). "
+                f"앱 미체결을 확인하세요.")
+            return
+        no = getattr(res, "ord_no", "") or ""
+        if no:
+            self.registry.attach_ord_no(rid, no)
+        if await self._late_rejections(ticker, [(order, rid, no)]):
+            await self.notifier.send(
+                f"🚨 [{ticker}] 마감 전 점검: 거부로 빠진 본 매수를 {qty}주 LOC @{price:.2f} 로 다시 냈지만 "
+                f"접수 뒤 또 거부됐습니다. 오늘 본 매수는 없습니다.")
+            return
         await self.notifier.send(
-            f"🚨 [{ticker}] 마감 전 점검: 오늘 본 매수가 미체결에 없습니다.\n"
-            f"  지금 시세 기준 계획: {exp}\n"
-            f"  LOC 접수 마감 전에 /run loc 로 다시 내거나 앱에서 확인하세요.")
+            f"🛠 [{ticker}] 마감 전 점검: 본 매수가 증권사 거부로 빠져 있어 자동으로 다시 냈습니다.\n"
+            f"  guard_buy {qty}주 LOC @{price:.2f} (현재가 {cur:.2f}×1.15, 원래 {exp})")
 
     # ------------------------------------------------------------
     # EOD 정산
@@ -1540,7 +1644,10 @@ class SchedulerEngine:
             required = getattr(eod_result.next_plan, "max_buy_amount", 0.0)
 
         with self.state_mgr.edit_state(ticker) as state:
-            result = reconcile(state, position, deposit, required)
+            # 자금 부족 판단은 여기서 하지 않는다. 06:30 에는 원화주문 한도가 0 으로 나와
+            # 달러 예수금만 보고 매일 '입금 필요' 를 잘못 띄웠다 (원화로 채우는 운용).
+            # 08:00 아침 요약과 17:00 입금 알림이 원화까지 계산해 알려준다.
+            result = reconcile(state, position, deposit, 0.0)
             newly_halted = apply_reconcile(state, result, position)
             for c in result.corrections:
                 self.state_mgr.record_correction(ticker, {

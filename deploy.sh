@@ -117,8 +117,16 @@ case "$MODE" in
                  echo  "  sudo journalctl -u $SERVICE --since \"$SINCE\" --no-pager | head -30" ;;
     *)           echo  "  $MODE" ;;
 esac
-ERRS=$(sudo journalctl -u "$SERVICE" --since "$SINCE" --no-pager | grep -cE "Traceback|\[ERROR\]" || true)
-[ "$ERRS" -gt 0 ] && red "  기동 로그에 오류 $ERRS 건 — sudo journalctl -u $SERVICE --since \"$SINCE\""
+# 새로 뜬 프로세스의 로그만 센다 — 꺼지는 이전 프로세스의 종료 잡음(Event loop is closed 등)은 빼고
+NEWPID=$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0)
+if [ -n "$NEWPID" ] && [ "$NEWPID" != "0" ]; then
+    ERRS=$(sudo journalctl -u "$SERVICE" _PID="$NEWPID" --since "$SINCE" --no-pager | grep -cE "Traceback|\[ERROR\]" || true)
+    ERRHINT="sudo journalctl -u $SERVICE _PID=$NEWPID --since \"$SINCE\""
+else
+    ERRS=$(sudo journalctl -u "$SERVICE" --since "$SINCE" --no-pager | grep -cE "Traceback|\[ERROR\]" || true)
+    ERRHINT="sudo journalctl -u $SERVICE --since \"$SINCE\""
+fi
+[ "$ERRS" -gt 0 ] && red "  기동 로그에 오류 $ERRS 건 — $ERRHINT"
 
 [ -x "$HOME_DIR/ops/install_watchdog.sh" ] && "$HOME_DIR/ops/install_watchdog.sh" || true
 

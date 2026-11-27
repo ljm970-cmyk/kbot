@@ -211,6 +211,18 @@ def _pick_list(body: dict, *keys: str) -> list:
     return []
 
 
+def reserved_ok(proc: str, err_text: str) -> bool:
+    """예약주문 처리내역이 정상 처리(실주문 전환 완료)를 뜻하는지."""
+    proc = str(proc or "")
+    err_text = str(err_text or "")
+    if "에러" in proc:
+        return False
+    # 처리내역에 사유가 적힌 거부도 proc_tp 는 '정상처리' 로 올 수 있다 — 문구로만 판단한다
+    if any(k in err_text for k in ("실패", "불가", "초과", "부족", "거부", "오류", "에러", "제한")):
+        return False
+    return "완료" in err_text
+
+
 def _pick(row: dict, *keys: str, default: Any = "") -> Any:
     """응답 스펙과 예시가 엇갈리는 필드용 (trde_tp vs frgn_trde_tp 등)"""
     for k in keys:
@@ -808,7 +820,11 @@ class KiwoomAPIClient:
             # 다시 신고된다 (실측 2026-09-22 22:40, 사유 칸이 모두 빈 채로).
             # 진짜 거부는 처리 에러가 났거나 증권사가 무효 처리한 경우다.
             err_text = str(_pick(r, "err_cntn") or "").strip()
-            is_error = "에러" in proc or proc == "9" or bool(err_text)
+            # err_cntn 은 '처리내역' 이라 성공 문구도 들어온다 — 실측 2026-11-27 23:40:
+            #   proc_tp 정상처리 · err_cntn "미국 예약주문 입력이 완료되었습니다."
+            # 이걸 거부로 보고 MOC 대체 LOC 매도를 또 내서 리버스 매도가 두 번 걸렸다.
+            is_error = "에러" in proc or proc == "9" or (
+                bool(err_text) and not reserved_ok(proc, err_text))
             is_void = not cancelled.startswith("미") and "무효" in cancelled
             if is_error or is_void:
                 bad.append({

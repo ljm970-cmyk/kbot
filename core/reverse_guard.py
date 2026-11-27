@@ -164,7 +164,8 @@ async def run_moc_check(kiwoom, ticker: str, exchange: str, now: datetime | None
     if row is not None:
         err = str(row.get("err_cntn") or "").strip()
         proc = str(row.get("proc_tp") or "")
-        if err or "에러" in proc:
+        from kiwoom.api_client import reserved_ok
+        if "에러" in proc or (err and not reserved_ok(proc, err)):
             L.append(f"  ❌ 예약 목록에 에러로 표시: {err or proc}")
         else:
             L.append(f"  ✅ 예약 목록 확인 — {proc or '미처리'} "

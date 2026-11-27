@@ -377,6 +377,19 @@ def test_error_text_alone_is_rejection():
     assert len(asyncio.run(api.verify_reserved_orders("SOXL", "NY"))) == 1
 
 
+def test_completion_message_is_not_rejection():
+    """실측 2026-11-27 23:40 — 리버스 첫날 MOC 예약이 실주문으로 넘어간 뒤 처리내역에
+    '미국 예약주문 입력이 완료되었습니다.' 가 찍혔다. 거부로 보면 LOC 매도를 또 낸다."""
+    for proc in ("정상처리", "미처리", ""):
+        api = _api_with([_rsv_row("R1", "미취소", proc=proc, err="미국 예약주문 입력이 완료되었습니다.")])
+        assert asyncio.run(api.verify_reserved_orders("SOXL", "NY")) == [], proc
+
+
+def test_completion_word_with_error_is_still_rejection():
+    api = _api_with([_rsv_row("R1", "미취소", proc="정상처리", err="주문 입력 실패 - 완료되지 않았습니다")])
+    assert len(asyncio.run(api.verify_reserved_orders("SOXL", "NY"))) == 1
+
+
 def test_void_is_rejection():
     api = _api_with([_rsv_row("R1", "무효")])
     assert len(asyncio.run(api.verify_reserved_orders("SOXL", "NY"))) == 1
